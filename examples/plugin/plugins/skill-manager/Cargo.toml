@@ -1,0 +1,12 @@
+[package]
+name = "openagent-plugin-skill-manager"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+openagent-pdk = { path = "../../../../plugin/pdk/rust" }
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
