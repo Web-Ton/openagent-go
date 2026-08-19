@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — one-step install for openagent-cli (Linux / macOS).
+# install.sh — one-step install for openagent (Linux / macOS).
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/<repo>/master/scripts/install.sh | bash
@@ -8,15 +8,16 @@
 # GitHub on failure. OPENAGENT_MIRROR forces one source.
 #
 # Config (env vars):
-#   OPENAGENT_CLI_NAME   binary name (default: openagent-cli)
-#   OPENAGENT_VERSION    e.g. v1.2.3 (default: latest from OBS openagent/latest/)
-#   REPO                 GitHub owner/name, used for fallback (default: yusheng-g/openagent-go)
-#   OPENAGENT_MIRROR     force source: "obs" or "github" (default: try OBS then GitHub)
-#   OBS_ENDPOINT         OBS bucket endpoint (default: https://twb.obs.cn-north-4.myhuaweicloud.com)
-#   OBS_PREFIX           OBS object prefix (default: openagent)
-#   SOUL_OVERWRITE       set to 1 to force-overwrite SOUL.md without prompting
+#   OPENAGENT_NAME        binary name (default: openagent); also drives the
+#                         config dir (~/.<name>) and OBS object prefix
+#   OPENAGENT_VERSION     e.g. v1.2.3 (default: latest from OBS <name>/latest/)
+#   REPO                  GitHub owner/name, used for fallback (default: yusheng-g/openagent-go)
+#   OPENAGENT_MIRROR      force source: "obs" or "github" (default: try OBS then GitHub)
+#   OBS_ENDPOINT          OBS bucket endpoint (default: https://twb.obs.cn-north-4.myhuaweicloud.com)
+#   OBS_PREFIX            OBS object prefix (default: same as OPENAGENT_NAME)
+#   SOUL_OVERWRITE        set to 1 to force-overwrite SOUL.md without prompting
 #   HUWEICLOUDOPENAPI_OVERWRITE  set to 1 to force re-download the API snapshot
-#   SUDO                 override privilege escalation; set SUDO='' to force direct (even as non-root)
+#   SUDO                  override privilege escalation; set SUDO='' to force direct (even as non-root)
 #
 # NOTE on checksum scope: SHA256SUMS.txt ships in the same release as the
 # binary, so this check defends against bit-flip / CDN corruption but NOT
@@ -25,7 +26,7 @@
 
 set -euo pipefail
 
-NAME="${OPENAGENT_CLI_NAME:-openagent-cli}"
+NAME="${OPENAGENT_NAME:-openagent}"
 REPO="${REPO:-yusheng-g/openagent-go}"
 INSTALL_PREFIX="/opt/${NAME}"
 BIN_LINK="/usr/local/bin/${NAME}"
@@ -51,7 +52,7 @@ trap 'rm -rf "${TMPDIR}"' EXIT
 # OPENAGENT_MIRROR=obs|github forces one source (no fallback). OBS bucket is
 # public-read, so no credentials needed to download.
 OBS_ENDPOINT="${OBS_ENDPOINT:-https://twb.obs.cn-north-4.myhuaweicloud.com}"
-OBS_PREFIX="${OBS_PREFIX:-openagent}"
+OBS_PREFIX="${OBS_PREFIX:-${NAME}}"
 MIRROR="${OPENAGENT_MIRROR:-}"
 case "${MIRROR}" in
   obs|github|"") ;;
@@ -77,7 +78,7 @@ case "${ARCH}" in
 esac
 
 # OBS latest directory holds the most recent release's artifacts. When the user
-# passes OPENAGENT_VERSION, use openagent/<ver>/; otherwise openagent/latest/.
+# passes OPENAGENT_VERSION, use <prefix>/<ver>/; otherwise <prefix>/latest/.
 obs_path_for_ver() {
   if [[ -z "${VER}" ]]; then printf '%s/latest' "${OBS_PREFIX}"
   else printf '%s/%s' "${OBS_PREFIX}" "${VER}"; fi
@@ -107,7 +108,7 @@ ARTIFACT="${NAME}_${VER:+${VER}_}${os_name}_${arch_name}.tar.gz"
 # resolving "latest" below. Re-derive ARTIFACT once VER is known.
 
 # ── resolve version + download (OBS primary, GitHub fallback) ──────────────────
-# For OBS: if VER unset, download from openagent/latest/ (no version-discovery API
+# For OBS: if VER unset, download from <prefix>/latest/ (no version-discovery API
 # needed — the directory IS the latest). For GitHub: if VER unset, call the
 # releases/latest API to learn the tag, then download from the tag URL.
 
@@ -291,7 +292,7 @@ run_priv ln -sf "${DEST_DIR}/${NAME}" "${BIN_LINK}"
 trap 'rm -rf "${TMPDIR}"' EXIT
 
 # ── SOUL.md profile (soft-coupled: warn on failure, never block install) ─────────
-# Copy the agent persona to ~/.openagent/profile/SOUL.md so the CLI picks it up
+# Copy the agent persona to ~/.<name>/profile/SOUL.md so the CLI picks it up
 # as its system persona. Overwrite policy:
 #   - SOUL_OVERWRITE=1 env var  → force overwrite, no prompt
 #   - target missing            → just write
@@ -302,7 +303,7 @@ install_soul() {
   local src="${TMPDIR}/SOUL.md"
   [[ -f "${src}" ]] || { warn "SOUL.md not downloaded; skipping profile install"; return 0; }
 
-  local profile_dir="${HOME}/.openagent/profile"
+  local profile_dir="${HOME}/.${NAME}/profile"
   local dst="${profile_dir}/SOUL.md"
 
   if [[ -f "${dst}" && -z "${SOUL_OVERWRITE:-}" ]]; then
@@ -342,7 +343,7 @@ install_system() {
   local src="${TMPDIR}/SYSTEM.md"
   [[ -f "${src}" ]] || { warn "SYSTEM.md not downloaded; skipping recipe install"; return 0; }
 
-  local profile_dir="${HOME}/.openagent/profile"
+  local profile_dir="${HOME}/.${NAME}/profile"
   local dst="${profile_dir}/SYSTEM.md"
   mkdir -p "${profile_dir}"
   if [[ -f "${dst}" ]]; then
@@ -357,14 +358,14 @@ install_system() {
 
 install_system || true
 
-# ── OpenAPI snapshot (~/.openagent/huaweicloudopenapi/) — independent of the binary archive ──
+# ── OpenAPI snapshot (~/.<name>/huaweicloudopenapi/) — independent of the binary archive ──
 # Fetches huaweicloudopenapi.tar.gz (version-independent, ~22MB gzip) and unpacks to
-# ~/.openagent/huaweicloudopenapi/ so SYSTEM.md's recipe can grep it locally. Idempotent: skip
+# ~/.<name>/huaweicloudopenapi/ so SYSTEM.md's recipe can grep it locally. Idempotent: skip
 # if the dir already exists (set HUWEICLOUDOPENAPI_OVERWRITE=1 to force re-download).
 # Mirror logic mirrors the binary: OBS primary, GitHub fallback, OPENAGENT_MIRROR forces one.
 # Soft-fail: never block the binary install.
 install_huaweicloudopenapi() {
-  local snap_dir="${HOME}/.openagent/huaweicloudopenapi"
+  local snap_dir="${HOME}/.${NAME}/huaweicloudopenapi"
   if [[ -d "${snap_dir}" && -z "${HUWEICLOUDOPENAPI_OVERWRITE:-}" ]]; then
     info "${snap_dir} already exists; skipping API snapshot (set HUWEICLOUDOPENAPI_OVERWRITE=1 to re-download)"
     return 0

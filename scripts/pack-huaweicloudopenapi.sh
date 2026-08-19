@@ -7,8 +7,8 @@
 #   api_details/<产品>/<API名>.json  详情（一 API 一文件）
 #
 # install.sh fetches the resulting huaweicloudopenapi.tar.gz as an independent
-# OBS object (openagent/huaweicloudopenapi.tar.gz) and unpacks it to
-# ~/.openagent/huaweicloudopenapi/. This script is run by a maintainer when the
+# OBS object (<prefix>/huaweicloudopenapi.tar.gz) and unpacks it to
+# ~/.<name>/huaweicloudopenapi/. This script is run by a maintainer when the
 # snapshot is refreshed, not by users.
 #
 # Usage:
@@ -32,7 +32,7 @@ det_n=$(find "${SRC_DIR}/api_details" -name '*.json' | wc -l)
 info "Source: ${SRC_DIR}  (${prod_n} product index files, ${det_n} detail files)"
 
 # Pack only the two subdirs so the tarball extracts to products/ + api_details/
-# at the cwd of extraction (install.sh unpacks into ~/.openagent/huaweicloudopenapi/).
+# at the cwd of extraction (install.sh unpacks into ~/.<name>/huaweicloudopenapi/).
 tar -C "${SRC_DIR}" -czf "${OUT}" products api_details
 
 sz=$(ls -lh "${OUT}" | awk '{print $5}')

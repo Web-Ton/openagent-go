@@ -1,4 +1,4 @@
-# install.ps1 — one-step install for openagent-cli (Windows).
+# install.ps1 — one-step install for openagent (Windows).
 #
 # Usage (run only if you trust this script source):
 #   irm https://raw.githubusercontent.com/<repo>/master/scripts/install.ps1 | iex
@@ -7,13 +7,14 @@
 # GitHub on failure. OPENAGENT_MIRROR forces one source.
 #
 # Config (env vars):
-#   OPENAGENT_CLI_NAME   binary name (default: openagent-cli)
-#   OPENAGENT_VERSION    e.g. v1.2.3 (default: latest from OBS openagent/latest/)
-#   REPO                 GitHub owner/name, used for fallback (default: yusheng-g/openagent-go)
-#   OPENAGENT_MIRROR     force source: "obs" or "github" (default: try OBS then GitHub)
-#   OBS_ENDPOINT         OBS bucket endpoint (default: https://twb.obs.cn-north-4.myhuaweicloud.com)
-#   OBS_PREFIX           OBS object prefix (default: openagent)
-#   SOUL_OVERWRITE       set to 1 to force-overwrite SOUL.md without prompting
+#   OPENAGENT_NAME        binary name (default: openagent); also drives the
+#                         config dir (~/.<name>) and OBS object prefix
+#   OPENAGENT_VERSION     e.g. v1.2.3 (default: latest from OBS <name>/latest/)
+#   REPO                  GitHub owner/name, used for fallback (default: yusheng-g/openagent-go)
+#   OPENAGENT_MIRROR      force source: "obs" or "github" (default: try OBS then GitHub)
+#   OBS_ENDPOINT          OBS bucket endpoint (default: https://twb.obs.cn-north-4.myhuaweicloud.com)
+#   OBS_PREFIX            OBS object prefix (default: same as OPENAGENT_NAME)
+#   SOUL_OVERWRITE        set to 1 to force-overwrite SOUL.md without prompting
 #   HUWEICLOUDOPENAPI_OVERWRITE  set to 1 to force re-download the API snapshot
 #
 # NOTE on checksum scope: SHA256SUMS.txt ships in the same release as the
@@ -30,7 +31,7 @@ try {
       [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 } catch {}
 
-$Name    = if ($env:OPENAGENT_CLI_NAME) { $env:OPENAGENT_CLI_NAME } else { 'openagent-cli' }
+$Name    = if ($env:OPENAGENT_NAME) { $env:OPENAGENT_NAME } else { 'openagent' }
 $Repo    = if ($env:REPO) { $env:REPO } else { 'yusheng-g/openagent-go' }
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\$Name"
 
@@ -123,7 +124,7 @@ function Install-Soul {
         return
     }
 
-    $ProfileDir = Join-Path $env:USERPROFILE '.openagent\profile'
+    $ProfileDir = Join-Path $env:USERPROFILE ".${Name}\profile"
     $Dst = Join-Path $ProfileDir 'SOUL.md'
 
     # SOUL_OVERWRITE=1 → force overwrite, no prompt.
@@ -161,7 +162,7 @@ function Install-System {
 
     # SYSTEM.md is a shared factual recipe, not user persona — always overwrite.
     # Keep a .bak of the previous version so local edits aren't silently destroyed.
-    $ProfileDir = Join-Path $env:USERPROFILE '.openagent\profile'
+    $ProfileDir = Join-Path $env:USERPROFILE ".${Name}\profile"
     $Dst = Join-Path $ProfileDir 'SYSTEM.md'
     $null = New-Item -ItemType Directory -Path $ProfileDir -Force
     if (Test-Path $Dst) {
@@ -177,10 +178,10 @@ function Install-System {
 
 function Install-HuaweiCloudOpenAPI {
     # OpenAPI snapshot: version-independent, ~22MB gzip, unpacks to
-    # ~/.openagent/huaweicloudopenapi/. Mirror logic mirrors the binary: OBS primary,
+    # ~/.<name>/huaweicloudopenapi/. Mirror logic mirrors the binary: OBS primary,
     # GitHub fallback, OPENAGENT_MIRROR forces one. Idempotent: skip if dir exists
     # unless HUWEICLOUDOPENAPI_OVERWRITE=1. Soft-fail: never block the binary install.
-    $SnapDir = Join-Path $env:USERPROFILE '.openagent\huaweicloudopenapi'
+    $SnapDir = Join-Path $env:USERPROFILE ".${Name}\huaweicloudopenapi"
     if ((Test-Path $SnapDir) -and $env:HUWEICLOUDOPENAPI_OVERWRITE -ne '1') {
         Write-Info "$SnapDir already exists; skipping API snapshot (set HUWEICLOUDOPENAPI_OVERWRITE=1 to re-download)"
         return
@@ -278,7 +279,7 @@ function Install-HuaweiCloudOpenAPI {
 # OBS is primary (users behind GFW can reach Huawei Cloud), GitHub is fallback.
 # OPENAGENT_MIRROR=obs|github forces one source. OBS bucket is public-read.
 $ObsEndpoint = if ($env:OBS_ENDPOINT) { $env:OBS_ENDPOINT } else { 'https://twb.obs.cn-north-4.myhuaweicloud.com' }
-$ObsPrefix   = if ($env:OBS_PREFIX)   { $env:OBS_PREFIX }   else { 'openagent' }
+$ObsPrefix   = if ($env:OBS_PREFIX)   { $env:OBS_PREFIX }   else { $Name }
 $Mirror      = if ($env:OPENAGENT_MIRROR) { $env:OPENAGENT_MIRROR } else { '' }
 if ($Mirror -and $Mirror -ne 'obs' -and $Mirror -ne 'github') {
     throw "OPENAGENT_MIRROR must be obs, github, or unset; got: $Mirror"

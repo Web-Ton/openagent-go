@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# release.sh — build, package, and publish a GitHub release for openagent-cli.
+# release.sh — build, package, and publish a GitHub release for openagent.
 #
 # Produces per-OS/arch archives, each containing the binary, LICENSE, the
 # matching install script, huawei-skills.txt, and SOUL.md; plus a SHA256SUMS.txt
@@ -7,27 +7,30 @@
 # recipe) as a top-level asset. Then creates a GitHub release via `gh` (or
 # uploads to an existing one with --clobber, so re-running on the same tag is
 # idempotent), and mirrors the artifacts to Huawei Cloud OBS
-# (openagent/<ver>/ + openagent/latest/).
+# (<prefix>/<ver>/ + <prefix>/latest/).
 #
 # Requires: go, git, gh, zip, hcloud (Huawei Cloud KooCLI, configured with
 # AK/SK + endpoint in ~/.obsutilconfig — see
 # https://support.huaweicloud.com/usermanual-hcli/hcli_04_009.html).
 #
 # Config (env vars):
-#   OPENAGENT_CLI_NAME   binary + artifact name prefix (default: openagent-cli)
-#   OPENAGENT_VERSION    explicit version tag (default: from `git describe`)
-#   REPO                 GitHub owner/name (default: inferred from origin remote)
+#   OPENAGENT_NAME        binary + artifact name prefix (default: openagent);
+#                         also injected as version.Name so the binary's config
+#                         dir (~/.<name>) and tmp root (/tmp/<name>) converge
+#                         with the install path
+#   OPENAGENT_VERSION     explicit version tag (default: from `git describe`)
+#   REPO                  GitHub owner/name (default: inferred from origin remote)
 #   DRY_RUN              set to any non-empty value to build+package but skip gh + OBS
 #   SKIP_OBS             set to any non-empty value to skip OBS upload (gh only)
 #   OBS_ENDPOINT         OBS bucket endpoint (default: https://twb.obs.cn-north-4.myhuaweicloud.com)
-#   OBS_PREFIX           OBS object prefix (default: openagent)
+#   OBS_PREFIX           OBS object prefix (default: same as OPENAGENT_NAME)
 #   HUWEICLOUDOPENAPI_TAR        path to snapshot tarball (default: huaweicloudopenapi.tar.gz in cwd)
 #   FORCE_HUWEICLOUDOPENAPI      set to any non-empty value to force snapshot re-upload even if hash matches
 #
 # Usage:
 #   bash scripts/release.sh                 # version from latest git tag
 #   OPENAGENT_VERSION=v1.2.3 bash scripts/release.sh
-#   OPENAGENT_CLI_NAME=mycli bash scripts/release.sh
+#   OPENAGENT_NAME=mycli bash scripts/release.sh
 #   REPO=owner/name bash scripts/release.sh  # override inferred origin remote
 #   DRY_RUN=1 bash scripts/release.sh       # build+package only, no upload
 #   SKIP_OBS=1 bash scripts/release.sh      # GitHub release only, no OBS mirror
@@ -37,7 +40,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
-NAME="${OPENAGENT_CLI_NAME:-openagent-cli}"
+NAME="${OPENAGENT_NAME:-openagent}"
 REPO="${REPO:-}"
 
 # Resolve REPO from the `origin` git remote (owner/name), so forks don't
@@ -88,10 +91,11 @@ if [[ ! "${VER}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]]; then
   die "invalid version (expected vX.Y.Z with optional pre-release): ${VER}"
 fi
 
-# NAME ends up in filenames, find -name patterns, and globs — reject anything
-# outside [A-Za-z0-9._-] so '*', spaces, etc. can't break the build matrix.
+# NAME ends up in filenames, find -name patterns, globs, and as version.Name
+# (which feeds filesystem paths). Reject anything outside [A-Za-z0-9._-] so '*',
+# spaces, etc. can't break the build matrix or produce unsafe path segments.
 if [[ ! "${NAME}" =~ ^[A-Za-z0-9._-]+$ ]]; then
-  die "invalid OPENAGENT_CLI_NAME (allowed: letters, digits, . _ -): ${NAME}"
+  die "invalid OPENAGENT_NAME (allowed: letters, digits, . _ -): ${NAME}"
 fi
 
 # Dirty tree first — before we create any tag, so a failed run leaves no
@@ -149,7 +153,12 @@ DIST_DIR="dist"
 rm -rf "${DIST_DIR}"
 mkdir -p "${DIST_DIR}"
 
-LDFLAGS="-s -w -X main.version=${VER}"
+# Inject both version.Name and version.Version into the version package so the
+# binary's identity (CLI name, config dir ~/.<name>, tmp root /tmp/<name>) and
+# reported version converge with the build. The version package is the single
+# source of truth (cmd/cli reads version.Name/Version, not main-local vars).
+VERSION_PKG="github.com/yusheng-g/openagent-go/version"
+LDFLAGS="-s -w -X ${VERSION_PKG}.Name=${NAME} -X ${VERSION_PKG}.Version=${VER}"
 
 build_one() {
   local goos="$1" goarch="$2"
@@ -245,12 +254,12 @@ info "Released ${VER} to GitHub"
 #
 # Config (env vars, all optional with defaults):
 #   OBS_ENDPOINT  default https://twb.obs.cn-north-4.myhuaweicloud.com
-#   OBS_PREFIX    default openagent
+#   OBS_PREFIX    default <OPENAGENT_NAME>
 #   SKIP_OBS      set to any non-empty value to skip OBS upload
 # Credentials: hcloud obs reads ~/.obsutilconfig (ak/sk/endpoint). See
 #   https://support.huaweicloud.com/usermanual-hcli/hcli_04_009.html
 OBS_ENDPOINT="${OBS_ENDPOINT:-https://twb.obs.cn-north-4.myhuaweicloud.com}"
-OBS_PREFIX="${OBS_PREFIX:-openagent}"
+OBS_PREFIX="${OBS_PREFIX:-${NAME}}"
 
 if [[ -n "${SKIP_OBS:-}" ]]; then
   info "SKIP_OBS set — skipping OBS upload"
@@ -365,7 +374,7 @@ else
     info "GitHub: creating ${SNAP_TAG} release for API snapshot"
     gh release create "${SNAP_TAG}" --repo "${REPO}" \
       --title "Huawei Cloud OpenAPI Snapshot" \
-      --notes "Version-independent API snapshot for openagent-cli. Updated by release.sh; not a binary release." \
+      --notes "Version-independent API snapshot for ${NAME}. Updated by release.sh; not a binary release." \
       || die "failed to create ${SNAP_TAG} release"
     gh release upload "${SNAP_TAG}" "${SNAP_TAR}" --repo "${REPO}" --clobber \
       || die "GitHub upload failed for ${SNAP_TAR}"

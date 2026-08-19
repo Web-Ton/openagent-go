@@ -58,12 +58,12 @@ When you do reach for the snapshot: the user's task is to find the API for a sce
 ## Where the data lives
 
 ```
-~/.openagent/huaweicloudopenapi/
+~/.hwcloud/huaweicloudopenapi/
   products/<product>.json            # index: one file per product, 206 of them
   api_details/<product>/<API>.json   # details: one file per API, ~15,729 of them
 ```
 
-**Precheck**: if `~/.openagent/huaweicloudopenapi/products/` does not exist, the API snapshot is not installed (OBS and GitHub both unreachable, e.g. offline). Local lookup is unavailable — tell the user "API snapshot not installed; to enable local lookup, reinstall with OBS or GitHub reachable, or manually download huaweicloudopenapi.tar.gz and unpack into `~/.openagent/huaweicloudopenapi/`", then fall back to websearch. Do not pretend you searched.
+**Precheck**: if `~/.hwcloud/huaweicloudopenapi/products/` does not exist, the API snapshot is not installed (OBS and GitHub both unreachable, e.g. offline). Local lookup is unavailable — tell the user "API snapshot not installed; to enable local lookup, reinstall with OBS or GitHub reachable, or manually download huaweicloudopenapi.tar.gz and unpack into `~/.hwcloud/huaweicloudopenapi/`", then fall back to websearch. Do not pretend you searched.
 
 ## Data format cheat sheet (verified — these are the fields)
 
@@ -82,8 +82,8 @@ When you do reach for the snapshot: the user's task is to find the API for a sce
 So: extract **2-3 candidate keywords** from the user query, at least one Chinese core noun + one intent verb or English term. grep each, take the **union** of hit product files:
 
 ```bash
-grep -rl "<keyword1>" ~/.openagent/huaweicloudopenapi/products/*.json
-grep -rl "<keyword2>" ~/.openagent/huaweicloudopenapi/products/*.json
+grep -rl "<keyword1>" ~/.hwcloud/huaweicloudopenapi/products/*.json
+grep -rl "<keyword2>" ~/.hwcloud/huaweicloudopenapi/products/*.json
 # …union, dedupe
 ```
 
@@ -104,7 +104,7 @@ At this point you have `name`, `productshort`, `method`, `uri`. If the user only
 ### Step 3: read details for schema
 
 ```bash
-Read ~/.openagent/huaweicloudopenapi/api_details/<productshort>/<name>.json
+Read ~/.hwcloud/huaweicloudopenapi/api_details/<productshort>/<name>.json
 ```
 
 `paths[uri][method].parameters` = input params, `responses` = output, `definitions` = schema defs (`$ref` cross-refs). Extract required input fields, tell the user how to call.
