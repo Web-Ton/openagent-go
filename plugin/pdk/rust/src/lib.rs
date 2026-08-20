@@ -20,236 +20,41 @@ pub mod export;
 pub mod host;
 
 // ── allocator ──
-
-// First-fit free-list allocator over a static 4 MiB heap.
 //
-// Memory is a working set, not a lifetime accumulator: dealloc actually
-// reclaims and freed blocks coalesce with their neighbours, so long-lived
-// plugin processes don't exhaust the heap (the previous bump allocator
-// never freed anything — every call leaked its input, output, and host
-// response buffers, and a ~50-turn conversation could empty a 128 KB heap).
-//
-// Block layout (wasm32 — 32-bit words):
-//
-//   offset 0   [size: u32]   full block size in bytes, header included;
-//                            low bit = in-use flag (set by alloc, cleared
-//                            by dealloc)
-//   offset 4   in use: this block's start offset, at payload-4
-//              free:   next free block offset, or NONE
-//   offset 8   payload — 8-aligned; payloads aligned above 8 move up and
-//                        keep their block start at payload-4
-//
-// Free blocks form a singly linked list (first-fit). dealloc coalesces
-// with the next block in O(1) (every block carries its size) and with the
-// previous block via a free-list walk (O(n) — n stays tiny on 4 MiB).
-//
-// dealloc is defensive: pointers outside the heap range, misaligned
-// pointers, and double frees are silent no-ops. That makes it safe for
-// the host to free any packed result — data-segment pointers (sdk_meta)
-// and zero pointers are rejected by the range check.
-//
-// alloc returns null when the heap is exhausted; callers (sdk_return)
-// check it and never write through null.
-
+// dlmalloc backed by wasm memory.grow — the std default allocator for
+// wasm32-unknown-unknown. Grows linear memory on demand (clamped by the
+// host's WithMemoryLimitPages = 512 MiB) instead of a fixed BSS heap.
 use core::alloc::{GlobalAlloc, Layout};
 
-const HEAP_SIZE: u32 = 4_194_304; // 4 MiB
-const HEADER: u32 = 8; // size + back/next words
-const MIN_BLOCK: u32 = HEADER + 8; // smallest block that can hold a payload
-const IN_USE: u32 = 1;
-const NONE: u32 = u32::MAX; // end of the free list
+// We wrap Dlmalloc ourselves instead of using the `global` feature's
+// GlobalDlmalloc because the host→guest ABI frees buffers with only a
+// pointer (C-style `free(ptr)`), no Layout. GlobalDlmalloc::dealloc calls
+// Dlmalloc::free which runs validate_size(ptr, layout.size()) — an
+// assertion that fails when the size doesn't match the allocation. Our
+// wrapper's dealloc calls c_free(ptr) directly, which reads the chunk
+// size from dlmalloc's own header and needs no Layout.
+struct DlmallocWrapper;
 
-// repr(align) applies to types, not statics — wrap the heap in one so
-// payloads keep their 8-byte alignment invariant.
-#[repr(align(8))]
-struct AlignedHeap([u8; HEAP_SIZE as usize]);
-
-static mut HEAP: AlignedHeap = AlignedHeap([0; HEAP_SIZE as usize]);
-
-/// Free-list head: offset of the first free block, NONE = empty. Block
-/// starts are always 8-aligned (heap base is aligned, sizes are 8-multiples).
-static mut FREE_HEAD: u32 = 0;
-
-/// Lazy one-time initialization (writes the initial whole-heap block).
-static mut INITIALIZED: bool = false;
-
-struct HeapAlloc;
-
-unsafe impl GlobalAlloc for HeapAlloc {
+unsafe impl GlobalAlloc for DlmallocWrapper {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        alloc_impl(layout)
+        (*core::ptr::addr_of_mut!(DLMALLOC)).malloc(layout.size(), layout.align())
     }
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
-        dealloc_impl(ptr)
+        (*core::ptr::addr_of_mut!(DLMALLOC)).c_free(ptr)
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        (*core::ptr::addr_of_mut!(DLMALLOC)).calloc(layout.size(), layout.align())
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, _layout: Layout, new_size: usize) -> *mut u8 {
+        (*core::ptr::addr_of_mut!(DLMALLOC)).c_realloc(ptr, new_size)
     }
 }
 
-// Not installed as the global allocator in test builds — std routes its own
-// allocations elsewhere; tests exercise alloc_impl/dealloc_impl directly.
+static mut DLMALLOC: dlmalloc::Dlmalloc = dlmalloc::Dlmalloc::new();
+
 #[cfg_attr(not(test), global_allocator)]
-static ALLOC: HeapAlloc = HeapAlloc;
+static ALLOC: DlmallocWrapper = DlmallocWrapper;
 
-unsafe fn ensure_init() {
-    if !INITIALIZED {
-        INITIALIZED = true;
-        FREE_HEAD = 0;
-        set_block_size(0, HEAP_SIZE);
-        set_next(0, NONE);
-    }
-}
-
-unsafe fn heap_bytes() -> *mut u8 {
-    core::ptr::addr_of_mut!(HEAP.0) as *mut u8
-}
-
-unsafe fn read_u32(off: u32) -> u32 {
-    (heap_bytes() as *const u8)
-        .add(off as usize)
-        .cast::<u32>()
-        .read_unaligned()
-}
-
-unsafe fn write_u32(off: u32, v: u32) {
-    heap_bytes()
-        .add(off as usize)
-        .cast::<u32>()
-        .write_unaligned(v)
-}
-
-unsafe fn block_size(off: u32) -> u32 {
-    read_u32(off) & !IN_USE
-}
-
-unsafe fn block_in_use(off: u32) -> bool {
-    read_u32(off) & IN_USE != 0
-}
-
-unsafe fn set_block_size(off: u32, sz: u32) {
-    write_u32(off, sz)
-}
-
-unsafe fn next_of(off: u32) -> u32 {
-    read_u32(off + 4)
-}
-
-unsafe fn set_next(off: u32, next: u32) {
-    write_u32(off + 4, next)
-}
-
-/// Remove a free block from the list (used when a neighbour absorbs it).
-unsafe fn unlink(off: u32) {
-    let mut prev = NONE;
-    let mut cur = FREE_HEAD;
-    while cur != NONE {
-        if cur == off {
-            let n = next_of(cur);
-            if prev == NONE {
-                FREE_HEAD = n;
-            } else {
-                set_next(prev, n);
-            }
-            return;
-        }
-        prev = cur;
-        cur = next_of(cur);
-    }
-}
-
-unsafe fn alloc_impl(layout: Layout) -> *mut u8 {
-    ensure_init();
-    // Zero-size allocations get a real block (Layout::array(0) must return
-    // a non-null, deallocatable pointer).
-    let size = if layout.size() == 0 { 8 } else { layout.size() as u32 };
-    let align = layout.align().max(8) as u32;
-    let align_up = |off: u32| (off + align - 1) & !(align - 1);
-
-    let mut prev = NONE;
-    let mut cur = FREE_HEAD;
-    while cur != NONE {
-        let bsize = block_size(cur);
-        let payload = align_up(cur + HEADER) - cur;
-        let mut need = payload + ((size + 7) & !7);
-        if need <= bsize {
-            let rest = bsize - need;
-            if rest >= MIN_BLOCK {
-                // Split: the remainder becomes a new free block.
-                set_block_size(cur + need, rest);
-                let cur_next = next_of(cur);
-                set_next(cur + need, cur_next);
-                if prev == NONE {
-                    FREE_HEAD = cur + need;
-                } else {
-                    set_next(prev, cur + need);
-                }
-            } else {
-                // Take the whole block (remainder too small to split).
-                need = bsize;
-                let cur_next = next_of(cur);
-                if prev == NONE {
-                    FREE_HEAD = cur_next;
-                } else {
-                    set_next(prev, cur_next);
-                }
-            }
-            let payload = align_up(cur + HEADER) - cur;
-            set_block_size(cur, need | IN_USE);
-            write_u32(cur + payload - 4, cur); // back pointer
-            return heap_bytes().add(cur as usize + payload as usize);
-        }
-        prev = cur;
-        cur = next_of(cur);
-    }
-    core::ptr::null_mut() // heap exhausted
-}
-
-unsafe fn dealloc_impl(ptr: *mut u8) {
-    if ptr.is_null() {
-        return;
-    }
-    ensure_init();
-    let base = heap_bytes() as usize;
-    // wrapping: pointers below the heap (stray addresses, u32-truncated
-    // host pointers in tests) wrap to a huge offset and get rejected.
-    let off = (ptr as usize).wrapping_sub(base);
-    if off < HEADER as usize || off >= HEAP_SIZE as usize {
-        return; // outside the heap (data-segment strings, stray pointers)
-    }
-    // Back pointer: the block start this payload belongs to. Note block 0
-    // is a legitimate start — its back pointer is 0 (the initial
-    // whole-heap block is the first one handed out).
-    let back = read_u32(off as u32 - 4);
-    if back >= HEAP_SIZE || back & 7 != 0 || back >= off as u32 {
-        return; // not a payload this allocator handed out
-    }
-    let mut size = block_size(back);
-    if !block_in_use(back) {
-        return; // double free
-    }
-    if back + size <= off as u32 {
-        return; // block does not cover the payload
-    }
-
-    // Coalesce with the next block (O(1) — every block carries its size).
-    let nb = back + size;
-    if nb < HEAP_SIZE && !block_in_use(nb) {
-        size += block_size(nb);
-        unlink(nb);
-    }
-    // Coalesce with the previous block: a free block F with
-    // F + size(F) == back absorbs us (O(n) free-list walk).
-    let mut cur = FREE_HEAD;
-    while cur != NONE {
-        if cur + block_size(cur) == back {
-            set_block_size(cur, block_size(cur) + size);
-            return; // absorbed — back never re-enters the list
-        }
-        cur = next_of(cur);
-    }
-    // Not absorbed: reinsert at the head, in-use bit cleared.
-    set_block_size(back, size);
-    set_next(back, FREE_HEAD);
-    FREE_HEAD = back;
-}
 
 // ── panic handler ──
 
@@ -321,14 +126,14 @@ pub fn sdk_alloc(size: u32) -> u32 {
 
 /// Return a heap allocation to the allocator. Exported as `dealloc` (see
 /// the export! macro) so the host can free the buffers it allocated (call
-/// inputs) and the packed results it read. Pointers that did not come from
-/// the heap — null, data-segment strings (sdk_meta), double frees — are
-/// ignored.
+/// inputs) and the packed results it read. Null pointers are ignored
+/// (dlmalloc's dealloc treats null as UB; the host's FreeBytes also filters
+/// ptr==0, so this guard is belt-and-suspenders).
 pub fn sdk_dealloc(ptr: u32) {
     if ptr == 0 {
         return;
     }
-    unsafe { dealloc_impl(ptr as *mut u8) }
+    unsafe { GlobalAlloc::dealloc(&ALLOC, ptr as *mut u8, Layout::new::<u8>()) }
 }
 
 /// Pack static JSON for no-arg exports (e.g. metadata).
@@ -397,240 +202,164 @@ pub mod prelude {
 
 // ── allocator tests ──
 //
-// Test builds do not install the global allocator (std routes its own
-// allocations elsewhere), so these call alloc_impl/dealloc_impl directly.
-// All tests share one static heap — a mutex serializes them and each
-// test resets to the initial single-block state.
+// dlmalloc is a black box — tests assert observable contract properties
+// (non-null, distinct, writeable, no-OOM under churn) via the public
+// sdk_alloc/sdk_dealloc ABI, not internal free-list structure.
 
 #[cfg(test)]
 mod allocator_tests {
     use super::*;
+    use core::alloc::{GlobalAlloc, Layout};
+
+    // dlmalloc is a black box — tests assert observable contract properties
+    // (non-null, distinct, writeable, no-OOM under churn) via GlobalAlloc
+    // directly, NOT via sdk_alloc/sdk_dealloc. The sdk_* functions use u32
+    // pointers (wasm32 ABI); on native 64-bit test builds they truncate
+    // dlmalloc's 64-bit mmap addresses and segfault. On wasm32 the u32 ABI
+    // is correct, so sdk_alloc/sdk_dealloc are exercised by the example
+    // plugins' integration tests instead.
+    //
+    // NOTE: double-free is NOT tested — dlmalloc treats it as UB. The host
+    // ABI (CallWithInput) frees each buffer exactly once; sdk_dealloc keeps
+    // a null guard only.
 
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    unsafe fn reset() {
-        INITIALIZED = false;
-        FREE_HEAD = 0;
-    }
-
-    fn alloc(size: usize, align: usize) -> *mut u8 {
-        unsafe { alloc_impl(Layout::from_size_align(size, align).unwrap()) }
-    }
-
-    fn dealloc(p: *mut u8) {
-        unsafe { dealloc_impl(p) }
-    }
-
-    fn heap_base() -> usize {
-        unsafe { heap_bytes() as usize }
-    }
-
-    /// Every test runs on a fresh heap (single whole-heap free block).
-    /// Poison-tolerant: one failing test must not cascade PoisonError into
-    /// every other test.
     fn fresh<T>(f: impl FnOnce() -> T) -> T {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe { reset() }
         f()
     }
 
+    fn alloc(size: usize, align: usize) -> *mut u8 {
+        let layout = Layout::from_size_align(size, align).unwrap();
+        unsafe { GlobalAlloc::alloc(&ALLOC, layout) }
+    }
+
+    fn dealloc(p: *mut u8, size: usize, align: usize) {
+        let layout = Layout::from_size_align(size, align).unwrap();
+        unsafe { GlobalAlloc::dealloc(&ALLOC, p, layout) }
+    }
+
     #[test]
-    fn alloc_free_roundtrip_reuses_block() {
+    fn alloc_returns_nonnull() {
         fresh(|| {
-            let a = alloc(100, 1);
-            assert!(!a.is_null(), "fresh 100B alloc must succeed");
-            let base = heap_base();
-            assert!((a as usize) >= base && (a as usize) - base < HEAP_SIZE as usize);
-            dealloc(a);
-            let b = alloc(100, 1);
-            assert_eq!(a, b, "freed block must be reused");
-            dealloc(b);
+            assert!(!alloc(1, 1).is_null(), "1-byte alloc");
+            assert!(!alloc(100, 1).is_null(), "100-byte alloc");
+            assert!(!alloc(0, 1).is_null(), "zero-size alloc must be non-null");
+            assert!(!alloc(1 << 20, 1).is_null(), "1 MiB alloc");
         });
     }
 
     #[test]
-    fn split_and_coalesce() {
+    fn alloc_distinct_ptrs() {
         fresh(|| {
-            let a = alloc(32, 1);
-            let b = alloc(32, 1);
-            let c = alloc(32, 1);
-            assert!(a < b && b < c, "fresh-heap allocs must be sequential");
-            // Free out of order: a, c, then b — b's free must coalesce
-            // both neighbours back into a single block.
-            dealloc(a);
-            dealloc(c);
-            dealloc(b);
-            let d = alloc(96, 1);
-            assert_eq!(d, a, "coalesced block must be reused whole");
-            dealloc(d);
+            let a = alloc(64, 1);
+            let b = alloc(64, 1);
+            assert!(!a.is_null() && !b.is_null(), "both must succeed");
+            assert_ne!(a, b, "distinct allocs must return distinct pointers");
         });
     }
 
     #[test]
-    fn fragmentation_roundtrip() {
+    fn alloc_dealloc_no_oom() {
         fresh(|| {
-            let x = alloc(40, 1);
-            let big = alloc(60 * 1024, 1);
-            assert!(!big.is_null(), "60KB on a fresh 4MiB heap must fit");
-            dealloc(x);
-            dealloc(big);
-            // First-fit carves from the block start, so the address is not
-            // guaranteed to repeat — the signal is that the whole freed
-            // region is reusable after coalescing.
-            let big2 = alloc(60 * 1024, 1);
-            assert!(!big2.is_null(), "60KB must fit after the heap is fully freed");
-            dealloc(big2);
+            // 1000 alloc→dealloc cycles must not exhaust memory.
+            // dlmalloc reuses freed blocks; if it leaked, this would OOM.
+            for _ in 0..1000 {
+                let p = alloc(8192, 1);
+                assert!(!p.is_null(), "alloc must not fail under churn");
+                dealloc(p, 8192, 1);
+            }
+        });
+    }
+
+    #[test]
+    fn dealloc_null_safe() {
+        fresh(|| {
+            // GlobalAlloc::dealloc with null is a no-op for dlmalloc
+            // (c_free checks is_null). Our sdk_dealloc also guards ptr==0.
+            dealloc(std::ptr::null_mut(), 32, 1);
+            let p = alloc(32, 1);
+            assert!(!p.is_null(), "alloc after dealloc(null) must succeed");
+            dealloc(p, 32, 1);
+        });
+    }
+
+    #[test]
+    fn large_alloc_succeeds() {
+        fresh(|| {
+            // 20 MiB allocation. On wasm32 this exceeds the initial ~1 MiB
+            // and forces memory.grow; on native it mmap's a fresh region.
+            // Either way, it must succeed (we have no 4 MiB BSS cap now).
+            let p = alloc(20 * 1024 * 1024, 1);
+            assert!(!p.is_null(), "20 MiB alloc must succeed");
+            dealloc(p, 20 * 1024 * 1024, 1);
+        });
+    }
+
+    #[test]
+    fn write_through_alloc() {
+        fresh(|| {
+            let size = 256;
+            let p = alloc(size, 1);
+            assert!(!p.is_null());
+            unsafe {
+                for i in 0..size {
+                    *p.add(i) = (i & 0xFF) as u8;
+                }
+                for i in 0..size {
+                    assert_eq!(*p.add(i), (i & 0xFF) as u8, "memory must be writable and readable");
+                }
+            }
+            dealloc(p, size, 1);
         });
     }
 
     #[test]
     fn alignment_is_honoured() {
         fresh(|| {
+            // dlmalloc's GlobalAlloc::alloc respects Layout::align.
             let p = alloc(24, 16);
-            assert!(!p.is_null());
-            assert_eq!(p as usize % 16, 0, "16-aligned payload");
-            dealloc(p);
+            assert!(!p.is_null(), "16-aligned alloc must succeed");
+            assert_eq!(p as usize % 16, 0, "payload must be 16-aligned");
+            dealloc(p, 24, 16);
+
             let q = alloc(9, 8);
-            assert_eq!(q as usize % 8, 0);
-            dealloc(q);
-            // The 16-aligned block must not have wasted the heap: after
-            // freeing, a large alloc still fits.
-            let r = alloc(120 * 1024, 1);
-            assert!(!r.is_null());
-            dealloc(r);
+            assert!(!q.is_null());
+            assert_eq!(q as usize % 8, 0, "payload must be 8-aligned");
+            dealloc(q, 9, 8);
         });
     }
 
     #[test]
-    fn zero_size_alloc_is_valid() {
+    fn many_allocs_then_free_all() {
         fresh(|| {
-            let p = alloc(0, 1);
-            assert!(!p.is_null(), "zero-size alloc must return non-null");
-            dealloc(p);
-            let q = alloc(16, 1);
-            assert!(!q.is_null(), "allocator sane after zero-size round trip");
-            dealloc(q);
-        });
-    }
-
-    #[test]
-    fn odd_sizes_are_rounded() {
-        fresh(|| {
-            let a = alloc(3, 1);
-            let b = alloc(3, 1);
-            assert!(a != b && !a.is_null() && !b.is_null());
-            dealloc(a);
-            dealloc(b);
-            let c = alloc(16, 1);
-            assert!(!c.is_null());
-            dealloc(c);
-        });
-    }
-
-    #[test]
-    fn double_free_is_silent_noop() {
-        fresh(|| {
-            let p = alloc(32, 1);
-            dealloc(p);
-            dealloc(p); // must not corrupt anything
-            let q = alloc(64, 1);
-            assert!(!q.is_null(), "allocator sane after double free");
-            dealloc(q);
-        });
-    }
-
-    #[test]
-    fn out_of_range_ptrs_are_noops() {
-        fresh(|| {
-            let base = heap_base();
-            dealloc(0 as *mut u8); // null
-            dealloc((base - 1) as *mut u8); // just before the heap
-            dealloc((base + HEAP_SIZE as usize) as *mut u8); // just after
-            let s: &'static str = "data segment string";
-            dealloc(s.as_ptr() as *mut u8); // static data, not heap
-            let p = alloc(32, 1);
-            assert!(!p.is_null(), "allocator sane after bogus frees");
-            dealloc(p);
-        });
-    }
-
-    #[test]
-    fn exhaustion_returns_null_and_recovers() {
-        fresh(|| {
+            // Allocate many blocks of varying sizes, then free all.
+            // Tests that dlmalloc doesn't corrupt its metadata under
+            // realistic allocation patterns.
             let mut ptrs = Vec::new();
-            loop {
-                let p = alloc(8 * 1024, 1);
-                if p.is_null() {
-                    break;
-                }
-                ptrs.push(p);
+            for i in 1..=100 {
+                let p = alloc(i * 64, 1);
+                assert!(!p.is_null(), "alloc {} failed", i);
+                ptrs.push((p, i * 64));
             }
-            assert!(!ptrs.is_empty(), "heap must fill");
-            assert!(
-                ptrs.len() <= 512,
-                "8KB blocks on 4MiB heap: at most 512 (got {})",
-                ptrs.len()
-            );
-            // Free two, then a same-size alloc must succeed.
-            dealloc(ptrs[0]);
-            dealloc(ptrs[1]);
-            let again = alloc(8 * 1024, 1);
-            assert!(!again.is_null(), "freed memory must be reusable");
-            // Free everything; full-heap alloc must succeed after coalescing.
-            for p in &ptrs {
-                dealloc(*p);
+            for (p, s) in &ptrs {
+                dealloc(*p, *s, 1);
             }
-            let big = alloc(120 * 1024, 1);
-            assert!(!big.is_null(), "coalesced heap must hold 120KB");
-            dealloc(big);
+            // After freeing everything, a large alloc must still work.
+            let big = alloc(4 * 1024 * 1024, 1);
+            assert!(!big.is_null(), "4 MiB alloc after mass free must succeed");
+            dealloc(big, 4 * 1024 * 1024, 1);
         });
     }
 
     #[test]
-    fn sdk_return_is_safe_on_oom() {
+    fn sdk_dealloc_null_is_safe() {
         fresh(|| {
-            let mut ptrs = Vec::new();
-            // Fill the heap completely: 8KB blocks first, then 16-byte
-            // blocks until nothing fits.
-            loop {
-                let p = alloc(8 * 1024, 1);
-                if p.is_null() {
-                    break;
-                }
-                ptrs.push(p);
-            }
-            loop {
-                let p = alloc(8, 1);
-                if p.is_null() {
-                    break;
-                }
-                ptrs.push(p);
-            }
-            // Truly exhausted: sdk_return must report empty (0), never
-            // write through null. (sdk_alloc/sdk_return deal in wasm ABI
-            // offsets, which only equal addresses on wasm32 — safe here
-            // because the guard path never copies.)
-            assert_eq!(sdk_return(b"hello world"), 0);
-            // Free two: the allocator must recover (the success path of
-            // sdk_return itself only runs on wasm32, exercised by the
-            // example plugins).
-            dealloc(ptrs[0]);
-            dealloc(ptrs[1]);
-            let again = alloc(8 * 1024, 1);
-            assert!(!again.is_null(), "heap must recover after freeing");
-            dealloc(again);
-        });
-    }
-
-    #[test]
-    fn sdk_dealloc_ignores_garbage() {
-        fresh(|| {
+            // sdk_dealloc(0) must be a no-op — the guard prevents calling
+            // dlmalloc with a null pointer (which c_free handles, but the
+            // guard is belt-and-suspenders for the host ABI).
             sdk_dealloc(0);
-            sdk_dealloc(u32::MAX);
-            sdk_dealloc(12345); // inside the heap range but not a payload
-            let p = alloc(32, 1);
-            assert!(!p.is_null());
-            dealloc(p);
         });
     }
 }

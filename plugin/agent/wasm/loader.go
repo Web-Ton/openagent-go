@@ -18,11 +18,10 @@ type loader struct {
 
 func newLoader(ctx context.Context) (loader, error) {
 	// Cap each plugin's linear memory at 512 MiB of virtual address
-	// space. PDK plugins never grow (static heap) and stay far below;
-	// the limit only stops a third-party plugin's memory.grow from
-	// running away (physical memory is allocated lazily per page, so a
-	// runaway grow that never touches its pages is harmless — the cap
-	// bounds the worst case a plugin can touch).
+	// space. PDK plugins use dlmalloc backed by memory.grow, growing
+	// on demand and staying well below this limit in practice; the cap
+	// bounds the worst case a plugin can reach (physical memory is
+	// allocated lazily per page, so untouched pages are harmless).
 	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithMemoryLimitPages(8192))
 	return loader{runtime: rt}, nil
 }

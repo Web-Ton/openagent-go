@@ -23,8 +23,9 @@ type Runtime struct {
 // construct one via wasmhost.NewHostAPI and register it directly.
 func NewRuntime(ctx context.Context) (*Runtime, error) {
 	// Same 512 MiB per-plugin linear-memory cap as the agent plugin
-	// loader (see plugin/agent/wasm/loader.go) — PDK plugins never grow,
-	// the cap only fences off a runaway third-party memory.grow.
+	// loader (see plugin/agent/wasm/loader.go). PDK plugins use dlmalloc
+	// backed by memory.grow, so this cap bounds how far a plugin can
+	// grow its linear memory.
 	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithMemoryLimitPages(8192))
 
 	// Unrestricted host filesystem for fs_* — the cli:http trust model

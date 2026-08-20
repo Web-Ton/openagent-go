@@ -47,14 +47,15 @@ import (
 //	}
 
 // maxPluginRequestBody bounds a cli:http request body before it is
-// serialized into the guest heap (the guest shares its 4 MiB heap
-// between request, logic, and response).
+// serialized into the guest heap (the guest shares its linear memory,
+// grown on demand via dlmalloc + memory.grow up to 512 MiB, between
+// request, logic, and response).
 const maxPluginRequestBody = 1 << 20 // 1 MiB
 
 // maxPluginResponseBody bounds the response body a plugin may return.
 // The guest must allocate the full JSON to serialize it; a body near
-// the 4 MiB heap would make the guest panic on alloc failure — reject
-// earlier with a specific error instead.
+// the 512 MiB cap would make alloc fail — reject earlier with a
+// specific error instead.
 const maxPluginResponseBody = 3 << 20 // 3 MiB
 
 // handlerTimeout bounds one guest invocation. A stuck plugin must never
