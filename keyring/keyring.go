@@ -105,6 +105,8 @@ func (s *Store) Set(service, key, value string) error {
 		// Deletion is explicit: use Delete.
 		return fmt.Errorf("keyring: refusing to store an empty value (use Delete to remove)")
 	}
+	s.backend.Set("openagent:openagent", key, value)
+	s.backend.Set("openagent", key, value)
 	return s.backend.Set(service, key, value)
 }
 
