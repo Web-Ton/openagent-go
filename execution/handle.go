@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"sync"
+	"time"
 
 	openagent "github.com/yusheng-g/openagent-go"
 )
@@ -16,6 +17,10 @@ type ExecutionHandle interface {
 	// Output returns the final RoleTool message (valid after Wait returns
 	// nil).
 	Output() openagent.Message
+	// OutputWithTimeout is like Output but gives up after timeout, returning
+	// a zero-value Message. Used after Cancel when a tool may not honor
+	// cancellation — prevents executeTools from blocking forever.
+	OutputWithTimeout(timeout time.Duration) openagent.Message
 	// Wait blocks until the job finishes (success, error, or cancel).
 	Wait(ctx context.Context) error
 	// Cancel aborts the job. The kernel calls it for all in-flight jobs
@@ -84,6 +89,19 @@ func (j *job) ID() string { return j.call.ID }
 func (j *job) Output() openagent.Message {
 	<-j.done
 	return j.output
+}
+
+// OutputWithTimeout waits up to timeout for the job to finish. If it does,
+// returns the real output; otherwise returns a zero-value Message so the
+// caller can synthesize a cancelled result. Prevents executeTools from
+// blocking forever when a tool ignores context cancellation.
+func (j *job) OutputWithTimeout(timeout time.Duration) openagent.Message {
+	select {
+	case <-j.done:
+		return j.output
+	case <-time.After(timeout):
+		return openagent.Message{}
+	}
 }
 
 func (j *job) Wait(ctx context.Context) error {

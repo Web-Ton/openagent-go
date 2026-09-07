@@ -12,7 +12,10 @@ package kernel
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"sync"
+	"time"
 
 	openagent "github.com/yusheng-g/openagent-go"
 	"github.com/yusheng-g/openagent-go/agent"
@@ -427,6 +430,7 @@ func (rt *Runtime) RunStreamWithPrefix(ctx context.Context, session openagent.Se
 	ch := make(chan openagent.StreamEvent, 16)
 	go func() {
 		defer close(ch)
+		defer recoverStreamPanic(ch)
 		if !rt.hasConfigModel() && session.Model == nil {
 			ch <- openagent.StreamEvent{Type: openagent.StreamError, Error: errNoModel}
 			return
@@ -451,6 +455,7 @@ func (rt *Runtime) RunGoalStream(ctx context.Context, session openagent.Session,
 	ch := make(chan openagent.StreamEvent, 16)
 	go func() {
 		defer close(ch)
+		defer recoverStreamPanic(ch)
 		if !rt.hasConfigModel() && session.Model == nil {
 			ch <- openagent.StreamEvent{Type: openagent.StreamError, Error: errNoModel}
 			return
@@ -460,6 +465,40 @@ func (rt *Runtime) RunGoalStream(ctx context.Context, session openagent.Session,
 		sub.run(ctx, session, nil, openagent.UserMessage(goal), ch)
 	}()
 	return ch
+}
+
+// recoverStreamPanic catches a panic in the RunStream/RunGoalStream
+// goroutine and emits it as a StreamError before close(ch) fires. Without
+// this, a panic in run() (prompt build, model call, guard, commit) crashes
+// the entire process — the deferred close(ch) runs but the panic propagates
+// past it. Tool-execution panics are already caught by execution/handle.go;
+// this covers the rest of the run() pipeline.
+func recoverStreamPanic(ch chan<- openagent.StreamEvent) {
+	if rec := recover(); rec != nil {
+		var msg string
+		switch v := rec.(type) {
+		case error:
+			msg = v.Error()
+		case string:
+			msg = v
+		default:
+			msg = fmt.Sprintf("%v", rec)
+		}
+		slog.Error("runtime panic recovered", "error", msg)
+		// Use a short-timeout context, not context.Background(): the
+		// original ctx may be cancelled (panic could stem from that), but
+		// Background never cancels — if ch is full (buffer 16) and the
+		// consumer has stopped reading, Background blocks forever,
+		// preventing close(ch) and leaking the goroutine. 5s gives the
+		// consumer time to drain; if it's stuck, we drop the event and
+		// let close(ch) proceed so the caller sees the stream end.
+		sendCtx, sendCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		chSend(sendCtx, ch, openagent.StreamEvent{
+			Type:  openagent.StreamError,
+			Error: fmt.Errorf("runtime panic: %s", msg),
+		})
+		sendCancel()
+	}
 }
 
 // hasConfigModel reports whether the config carries a model, under mu

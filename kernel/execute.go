@@ -91,15 +91,29 @@ func (rt *Runtime) executeTools(ctx context.Context, session openagent.Session, 
 		}
 		if err := h.Wait(ctx); err != nil && ctx.Err() != nil {
 			// Run cancelled mid-execution: cancel this job and the rest,
-			// keep the (complete) results — Output below waits for the
-			// job to actually finish, so the loop's cancel compensation
-			// sees real tool results, not zero-value messages.
+			// then wait up to 5s for each to actually finish so Output()
+			// doesn't block forever on a tool that ignores cancellation.
 			h.Cancel()
 			for _, rest := range handles[i+1:] {
 				if rest != nil {
 					rest.Cancel()
 				}
 			}
+			// If the job doesn't finish within the grace period, synthesize
+			// a cancelled result instead of blocking indefinitely — a tool
+			// that ignores context (e.g. a long shell command with no
+			// cancellation check) would otherwise hang executeTools forever.
+			results[i] = h.OutputWithTimeout(5 * time.Second)
+			if results[i].Content == "" {
+				results[i] = openagent.Message{
+					Role:       openagent.RoleTool,
+					ToolCallID: calls[i].ID,
+					Content:    "[tool execution cancelled — did not terminate within 5s]",
+				}
+			}
+			rt.state.RecordExecution(calls[i].ID, calls[i].Function.Name, "cancelled", time.Time{})
+			rt.logEvent(ctx, session.ID, eventbus.EventToolResult, results[i].Content, map[string]string{"call_id": calls[i].ID})
+			continue
 		}
 		results[i] = h.Output()
 		rt.state.RecordExecution(calls[i].ID, calls[i].Function.Name, "done", time.Time{})

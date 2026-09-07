@@ -317,7 +317,9 @@ func (m *MessageStore) Compact(ctx context.Context, sessionID string, throughInd
 		}
 		if cc != nil {
 			cc.ThroughIndex = safeIdx
-			m.storeCompressed(ctx, sessionID, cc)
+			if err := m.storeCompressed(ctx, sessionID, cc); err != nil {
+				return fmt.Errorf("sqlite compact: store compressed: %w", err)
+			}
 		}
 	}
 

@@ -188,25 +188,29 @@ func (m *MessageStore) Compact(ctx context.Context, sessionID string, throughInd
 		return err
 	}
 
+	// Phase 1 (locked): read messages + previous compression state.
+	// The LLM Summarize call happens outside the lock (Phase 2) so it
+	// doesn't block all sessions for the duration of the model call.
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	all := messages
 	var err error
 	if all == nil || throughIndex > len(all) {
 		all, err = m.readAllLocked(ctx, sessionID)
 		if err != nil {
+			m.mu.Unlock()
 			return err
 		}
 	}
 
 	if len(all) == 0 || throughIndex <= 0 || throughIndex > len(all) {
+		m.mu.Unlock()
 		return nil
 	}
 
 	// Adjust to safe boundary (don't cut tool_call/tool_result pairs).
 	safeIdx := openagent.SafeCompressionBoundary(all, throughIndex)
 	if safeIdx <= 0 {
+		m.mu.Unlock()
 		return nil
 	}
 
@@ -216,17 +220,29 @@ func (m *MessageStore) Compact(ctx context.Context, sessionID string, throughInd
 	if prev != nil {
 		lastIdx = prev.ThroughIndex
 	}
+	m.mu.Unlock()
 
-	// Only compress newly overflowed messages.
-	if lastIdx < safeIdx {
-		newMsgs := all[lastIdx:safeIdx]
-		cc, err := m.summarizer.Summarize(ctx, newMsgs, prev)
-		if err == nil && cc != nil {
-			cc.ThroughIndex = safeIdx
-			m.writeCompressed(sessionID, cc)
-		}
+	// Phase 2 (unlocked): only compress newly overflowed messages.
+	if lastIdx >= safeIdx {
+		return nil
 	}
+	newMsgs := all[lastIdx:safeIdx]
+	cc, err := m.summarizer.Summarize(ctx, newMsgs, prev)
+	if err != nil {
+		return fmt.Errorf("file compact: summarize: %w", err)
+	}
+	if cc == nil {
+		return nil
+	}
+	cc.ThroughIndex = safeIdx
 
+	// Phase 3 (locked): write the compressed result.
+	m.mu.Lock()
+	if err := m.writeCompressed(sessionID, cc); err != nil {
+		m.mu.Unlock()
+		return fmt.Errorf("file compact: write: %w", err)
+	}
+	m.mu.Unlock()
 	return nil
 }
 

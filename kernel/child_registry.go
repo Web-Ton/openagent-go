@@ -116,6 +116,11 @@ func (r *childRegistry) startAsync(child *liveChild, session openagent.Session, 
 	}
 	r.activeAsync++
 	child.running = true
+	// Create the cancel function BEFORE releasing child.mu so KillAll
+	// (which reads child.cancel under child.mu) never sees nil — the
+	// goroutine launch window can't be raced by KillAll anymore.
+	bgCtx, cancel := context.WithCancel(context.Background())
+	child.cancel = cancel
 	r.mu.Unlock()
 	child.mu.Unlock()
 
@@ -123,18 +128,12 @@ func (r *childRegistry) startAsync(child *liveChild, session openagent.Session, 
 		defer func() {
 			child.mu.Lock()
 			child.running = false
+			child.cancel = nil
 			child.mu.Unlock()
 			r.mu.Lock()
 			r.activeAsync--
 			r.mu.Unlock()
 		}()
-		// Cancellable background context: the child outlives the parent
-		// turn, but KillAll (session close) can cancel it. The child's own
-		// MaxTurns bounds its runtime otherwise.
-		bgCtx, cancel := context.WithCancel(context.Background())
-		child.mu.Lock()
-		child.cancel = cancel
-		child.mu.Unlock()
 		slog.Debug("subagent async start", "agent_id", child.id, "session_id", child.sessionID)
 		output, err := runChild(bgCtx, child.cfg, child.resolveDeps(), session, task, nil, child.sessionID)
 		slog.Debug("subagent async done", "agent_id", child.id, "output_len", len(output), "err", err)
@@ -165,6 +164,12 @@ func (r *childRegistry) startAsync(child *liveChild, session openagent.Session, 
 // on session close so background goroutines don't outlive the session. After
 // KillAll, the registry is empty — a sub_agent_send to any prior child id
 // returns "not found".
+//
+// activeAsync is NOT reset here: each cancelled goroutine's defer still
+// decrements it as it exits. Resetting to 0 here would cause underflow
+// (0 → -1 → -2 …) when the goroutines actually terminate, breaking the
+// concurrency cap. The counter naturally returns to 0 once all cancelled
+// goroutines drain.
 func (r *childRegistry) KillAll() {
 	r.mu.Lock()
 	children := make([]*liveChild, 0, len(r.live))
@@ -172,7 +177,6 @@ func (r *childRegistry) KillAll() {
 		children = append(children, c)
 	}
 	r.live = make(map[string]*liveChild)
-	r.activeAsync = 0
 	r.mu.Unlock()
 
 	for _, c := range children {
