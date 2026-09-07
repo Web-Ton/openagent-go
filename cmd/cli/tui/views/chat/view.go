@@ -563,12 +563,23 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 		components.RenderCommandTipOn("esc", "cancel", theme.BgSurface),
 		components.RenderCommandTipOn("enter", "select", theme.BgSurface),
 	)
-	gap := width - utils.DisplayWidth(chips) - utils.DisplayWidth(tips) - 2
-	if gap < 2 {
-		gap = 2
+	// Every span of the strip carries the surface background explicitly:
+	// plain spaces between styled segments sit behind an inner ANSI reset,
+	// where the outer style's background never reaches (a black hole in
+	// the middle of the strip). The strip spans the panel edge to edge.
+	strip := theme.BaseStyle().Background(theme.BgSurface)
+	lead, trail := 2, 1
+	mid := width - utils.DisplayWidth(chips) - utils.DisplayWidth(tips) - lead - trail
+	if mid < 2 {
+		mid = 2
 	}
-	footer := theme.BaseStyle().Width(width).Background(theme.BgSurface).
-		Render(lipgloss.JoinHorizontal(lipgloss.Left, chips, strings.Repeat(" ", gap), tips))
+	footer := lipgloss.JoinHorizontal(lipgloss.Left,
+		strip.Render(strings.Repeat(" ", lead)),
+		chips,
+		strip.Render(strings.Repeat(" ", mid)),
+		tips,
+		strip.Render(strings.Repeat(" ", trail)),
+	)
 
 	content := lipgloss.JoinVertical(lipgloss.Left, header, "", footer)
 
