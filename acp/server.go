@@ -2992,8 +2992,8 @@ func (a *acpApprover) Ask(ctx context.Context, call openagent.ToolCall, def open
 		// ones don't. Cross-session rules are a separate configuration
 		// layer, not a button grant.
 		Options: []openacp.PermissionOption{
-			{OptionID: "allow_once", Name: "Allow Once", Kind: openacp.PermissionAllowOnce},
-			{OptionID: "allow_always", Name: "Allow Always", Kind: openacp.PermissionAllowAlways},
+			{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce},
+			{OptionID: "allow_always", Name: "Allow always", Kind: openacp.PermissionAllowAlways},
 			{OptionID: "reject_once", Name: "Reject", Kind: openacp.PermissionRejectOnce},
 		},
 	})
@@ -3020,7 +3020,7 @@ func (a *acpApprover) Ask(ctx context.Context, call openagent.ToolCall, def open
 	case "allow_once":
 		// Deliberately NOT remembered (ACP allow_once semantics): the
 		// same tool + args asks again next time — a session-level grant
-		// is what "Allow Always" is for.
+		// is what "Allow always" is for.
 		return governance.Decision{Action: governance.Allow, Reason: "allow once"}, nil
 	case "allow_always":
 		// Session-scoped (ACP allow_always semantics): the same tool +

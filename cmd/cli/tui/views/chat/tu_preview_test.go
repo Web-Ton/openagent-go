@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -52,12 +53,17 @@ func TestTUPreview(t *testing.T) {
 	m.usedTokens = 16110
 	m.contextSize = 1000000
 	// A pending permission request renders the approval panel in the input
-	// slot (opencode-style chips, second option preselected).
+	// slot (opencode-style chips, second option preselected, command
+	// detail under the muted title).
 	m.permissionReq = &openacp.RequestPermissionRequest{
-		ToolCall: openacp.ToolCallUpdate{Title: "shell Read go.mod and README top"},
+		ToolCall: openacp.ToolCallUpdate{
+			Title:    "shell Read go.mod and README top",
+			Kind:     "execute",
+			RawInput: json.RawMessage(`{"command":"cat go.mod README.md | head -40"}`),
+		},
 		Options: []openacp.PermissionOption{
-			{OptionID: "once", Name: "Allow Once"},
-			{OptionID: "always", Name: "Allow Always"},
+			{OptionID: "once", Name: "Allow once"},
+			{OptionID: "always", Name: "Allow always"},
 			{OptionID: "reject", Name: "Reject"},
 		},
 	}

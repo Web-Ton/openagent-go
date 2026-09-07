@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"encoding/json"
 	"fmt"
 	"image/color"
 	"math"
@@ -517,8 +518,10 @@ func (m *Model) renderScrollbar(height int) string {
 // renderPermissionPanel renders an inline panel (replacing the input area)
 // showing the tool call that needs approval, styled after opencode's
 // permission prompt: a warning left rail on the panel background, a
-// two-line header ("⚠ Permission required" over the tool title), and the
-// options as horizontal chips on a surface strip where the selected chip is
+// two-line header ("⚠ Permission required" over the muted kind icon and
+// tool title), the raw command or path as body detail under a muted label,
+// and the options as horizontal chips on a surface strip with a blank
+// strip row above and below (vertical breathing). The selected chip is
 // filled with the warning color. Bottom-aligned above status.
 func (m *Model) renderPermissionPanel(width, _ int) string {
 	req := m.permissionReq
@@ -531,14 +534,27 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 	panel := theme.BaseStyle().Background(theme.BgPanel)
 	yellow := lipgloss.Color("#ffd60a")
 	warn := theme.BaseStyle().Background(theme.BgPanel).Foreground(yellow)
+	muted := panel.Foreground(theme.TextAsh)
 
 	header := lipgloss.JoinVertical(lipgloss.Left,
 		panel.Render(lipgloss.JoinHorizontal(lipgloss.Left,
 			warn.Render("⚠"),
 			panel.Foreground(theme.TextNormal).Render(" Permission required"),
 		)),
-		panel.Foreground(theme.TextNormal).Render("  "+title),
+		muted.Render("  "+permissionKindIcon(tc.Kind)+title),
 	)
+
+	// Body detail: what is actually being approved, per opencode — the
+	// shell command ("$ cmd") or the path in question ("- path") under a
+	// muted label. Skipped when the raw input carries neither.
+	var parts []string
+	parts = append(parts, header)
+	if label, lines, ok := permissionDetail(tc.RawInput, width-6); ok {
+		parts = append(parts, "", muted.Render("   "+label))
+		for _, ln := range lines {
+			parts = append(parts, panel.Foreground(theme.TextNormal).Render("   "+ln))
+		}
+	}
 
 	chipParts := make([]string, 0, len(req.Options)*2)
 	for i, opt := range req.Options {
@@ -553,7 +569,7 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 			chipParts = append(chipParts,
 				theme.BaseStyle().Background(theme.Warning).Foreground(theme.TextInk).Render(" "+name+" "))
 		} else {
-			chipParts = append(chipParts, panel.Foreground(theme.TextAsh).Render(name))
+			chipParts = append(chipParts, muted.Render(name))
 		}
 	}
 	chips := lipgloss.JoinHorizontal(lipgloss.Left, chipParts...)
@@ -566,7 +582,8 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 	// Every span of the strip carries the surface background explicitly:
 	// plain spaces between styled segments sit behind an inner ANSI reset,
 	// where the outer style's background never reaches (a black hole in
-	// the middle of the strip). The strip spans the panel edge to edge.
+	// the middle of the strip). The strip spans the panel edge to edge,
+	// with a full-width blank strip row above and below the chips.
 	strip := theme.BaseStyle().Background(theme.BgSurface)
 	lead, trail := 2, 1
 	mid := width - utils.DisplayWidth(chips) - utils.DisplayWidth(tips) - lead - trail
@@ -580,8 +597,15 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 		tips,
 		strip.Render(strings.Repeat(" ", trail)),
 	)
+	// Vertical breathing: a full-width blank strip row above and below the
+	// chips. The row must be width-1, not width: with the left border,
+	// lipgloss squeezes the content box to Width-1 and word-wraps a
+	// whitespace-only line one column over into nothing — the surface
+	// background collapses with it (the empty style-on-nothing span).
+	blankStrip := strip.Render(strings.Repeat(" ", width-1))
 
-	content := lipgloss.JoinVertical(lipgloss.Left, header, "", footer)
+	parts = append(parts, "", blankStrip, footer, blankStrip)
+	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
 	borderColor := theme.Warning
 	return theme.BaseStyle().
@@ -591,6 +615,57 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 		BorderBackground(theme.BgPanel).
 		BorderForeground(borderColor).
 		Render(content)
+}
+
+// permissionKindIcon maps the ACP tool kind to opencode's muted kind icon
+// on the title line. ASCII-only: opencode's ←/→ glyphs are East-Asian-
+// ambiguous width and overstrike adjacent text in CJK terminals (same
+// constraint that bans them from the tool rows), so read/edit kinds get no
+// icon rather than a rendering hazard.
+func permissionKindIcon(kind string) string {
+	switch kind {
+	case "execute":
+		return "#"
+	case "fetch":
+		return "%"
+	case "search":
+		return "*"
+	default:
+		return ""
+	}
+}
+
+// permissionDetail extracts the opencode-style body detail from the raw
+// tool arguments: shell-style calls surface the actual command ("$ ..."),
+// path-based calls a Patterns list ("- path"). ok=false when the arguments
+// carry neither, leaving the panel title-only.
+func permissionDetail(raw any, maxW int) (label string, lines []string, ok bool) {
+	if raw == nil {
+		return "", nil, false
+	}
+	// RawInput is typed any on the ACP wire type: normalize to JSON bytes
+	// (json.RawMessage marshals to itself; a decoded map marshals normally).
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return "", nil, false
+	}
+	var args struct {
+		Command json.RawMessage `json:"command"`
+		Path    string          `json:"path"`
+	}
+	if err := json.Unmarshal(b, &args); err != nil {
+		return "", nil, false
+	}
+	if len(args.Command) > 0 {
+		var cmd string
+		if err := json.Unmarshal(args.Command, &cmd); err == nil && cmd != "" {
+			return "Command", []string{"$ " + utils.TruncateByWidth(cmd, maxW)}, true
+		}
+	}
+	if args.Path != "" {
+		return "Patterns", []string{"- " + utils.TruncateByWidth(args.Path, maxW)}, true
+	}
+	return "", nil, false
 }
 
 // panelBox returns the outer (frame) and inner content width for the
