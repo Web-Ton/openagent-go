@@ -2356,17 +2356,19 @@ func (m *Model) isTurnEndAt(i int, msg ChatMessage) bool {
 	return !m.loading && !m.replaying
 }
 
-// turnEndMarkerRow renders the opencode-style end-of-turn line: a square
-// icon, the active model and the turn duration — icon in the primary color,
-// the rest muted, left-aligned at the transcript indent. Empty segments are
-// skipped along with their separator.
+// turnEndMarkerRow renders the end-of-turn line: the active model and the
+// turn duration, muted, left-aligned at the transcript indent. Empty
+// segments are skipped along with their separator.
 func (m *Model) turnEndMarkerRow(i int, msg ChatMessage, vpW int) string {
 	muted := theme.BaseStyle().Foreground(theme.TextMute)
 	sep := muted.Render(" · ")
-	parts := theme.BaseStyle().Foreground(theme.Primary).Render("□ ")
+	parts := ""
 	first := true
 	if model := utils.TruncateByWidth(m.currentModel(), 32); model != "" {
-		parts += sep + muted.Render(model)
+		if !first {
+			parts += sep
+		}
+		parts += muted.Render(model)
 		first = false
 	}
 	if d := m.turnDuration(i, msg); d > 0 {
@@ -2379,24 +2381,38 @@ func (m *Model) turnEndMarkerRow(i int, msg ChatMessage, vpW int) string {
 		utils.TruncateStyled(parts, max(1, vpW-transcriptIndent))
 }
 
+// maxTurnRowGap bounds turnDuration's backward walk. Rows inside one turn
+// stream within minutes of each other; a wider row-to-row jump means the
+// transcript cannot see the turn boundary — injected <system-reminder>
+// prompts (settings reload, sub-agent results) run real turns with no
+// visible user row, and an unbounded walk then lands on the previous
+// visible turn's user row days earlier (the 4043m16s marker regression).
+const maxTurnRowGap = time.Hour
+
 // turnDuration returns the wall-clock span of the turn that message i
-// closes: from the turn's opening user prompt to this message. 0 when
-// either side has no timestamp (legacy rows).
+// closes: from the turn's opening user prompt to this message. 0 when the
+// closing message has no timestamp. The walk-back stops at the user row
+// (the natural opener), at a row without a timestamp (legacy replay — no
+// fabricated spans), and at any gap wider than maxTurnRowGap. Past one of
+// those, the duration covers just the visible burst rather than a
+// cross-turn nonsense value.
 func (m *Model) turnDuration(i int, msg ChatMessage) time.Duration {
 	if msg.CreatedAt.IsZero() {
 		return 0
 	}
+	start, cur := msg.CreatedAt, msg.CreatedAt
 	for j := i - 1; j >= 0; j-- {
-		if m.messages[j].Role != "user" {
-			continue
+		prev := m.messages[j]
+		if prev.CreatedAt.IsZero() || cur.Sub(prev.CreatedAt) > maxTurnRowGap {
+			break
 		}
-		if m.messages[j].CreatedAt.IsZero() {
-			return 0
+		start, cur = prev.CreatedAt, prev.CreatedAt
+		if prev.Role == "user" {
+			break
 		}
-		if d := msg.CreatedAt.Sub(m.messages[j].CreatedAt); d > 0 {
-			return d
-		}
-		return 0
+	}
+	if d := msg.CreatedAt.Sub(start); d > 0 {
+		return d
 	}
 	return 0
 }
