@@ -44,6 +44,18 @@ type StreamEvent struct {
 	ToolCallID string          // tool_progress — disambiguates concurrent streaming tools
 	Skills     []SkillInfo     // skills_updated — the new skill catalog
 	Compaction *CompactionInfo // compacting/compacted — compaction state
+	Retry      *RetryInfo      // retrying — retry state
+}
+
+// RetryInfo carries retry state for StreamRetrying events: which model is
+// being retried, which attempt this is, how long the runtime will wait
+// before the next attempt, and the error that triggered the retry.
+type RetryInfo struct {
+	Model          string  // model ID being retried (e.g. "gpt-4o")
+	Attempt        int     // retry attempt number (1-based: 1st retry = 1)
+	MaxRetries     int     // total retries allowed
+	BackoffSeconds float64 // backoff delay before this retry
+	Error          error   // the error that triggered the retry
 }
 
 // CompactionInfo carries compaction state for StreamCompacting/StreamCompacted
