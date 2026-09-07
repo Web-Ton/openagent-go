@@ -300,7 +300,9 @@ type fakeMetaStore struct {
 	sessions map[string]session.SessionInfo
 }
 
-func newFakeMetaStore() *fakeMetaStore { return &fakeMetaStore{sessions: map[string]session.SessionInfo{}} }
+func newFakeMetaStore() *fakeMetaStore {
+	return &fakeMetaStore{sessions: map[string]session.SessionInfo{}}
+}
 
 func (f *fakeMetaStore) Save(ctx context.Context, info session.SessionInfo) error {
 	f.sessions[info.ID] = info

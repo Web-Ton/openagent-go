@@ -68,8 +68,8 @@ func (m *twoTurnModel) ChatCompletion(_ context.Context, _ openagent.ChatComplet
 			Message: openagent.Message{
 				Role: openagent.RoleAssistant,
 				ToolCalls: []openagent.ToolCall{{
-					ID:   "call_1",
-					Type: "function",
+					ID:       "call_1",
+					Type:     "function",
 					Function: openagent.ToolCallFunction{Name: "blocking_tool", Arguments: "{}"},
 				}},
 			},
@@ -78,9 +78,9 @@ func (m *twoTurnModel) ChatCompletion(_ context.Context, _ openagent.ChatComplet
 		return resp, nil
 	}
 	resp.Choices = []openagent.Choice{{
-		Index:         0,
-		Message:       openagent.Message{Role: openagent.RoleAssistant, Content: "done"},
-		FinishReason:  "stop",
+		Index:        0,
+		Message:      openagent.Message{Role: openagent.RoleAssistant, Content: "done"},
+		FinishReason: "stop",
 	}}
 	return resp, nil
 }
@@ -271,7 +271,7 @@ func TestRun_ParentRunIDPropagation(t *testing.T) {
 	parentRunID := "parent-run-abc"
 	ctx := openagent.WithRunInfo(context.Background(), openagent.RunInfo{
 		RunID:       parentRunID,
-		TurnID:      2, // a team is not a turn loop; some non-zero value
+		TurnID:      2,                     // a team is not a turn loop; some non-zero value
 		ParentRunID: "grandparent-run-xyz", // a Plan nested in a Team must not lose the team's own parent
 	})
 

@@ -44,7 +44,7 @@ var cftCacheDirName = version.Name + string(filepath.Separator) + "chrome-for-te
 type cftVersionResponse struct {
 	Channels struct {
 		Stable struct {
-			Version string `json:"version"`
+			Version   string `json:"version"`
 			Downloads struct {
 				Chrome []struct {
 					Platform string `json:"platform"`

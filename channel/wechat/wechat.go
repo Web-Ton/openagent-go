@@ -358,8 +358,8 @@ func (c *Channel) buildMediaItem(ctx context.Context, kind, path string, data []
 			return nil, err
 		}
 		return map[string]any{"type": protocol.ItemVideo, "video_item": map[string]any{
-			"media":       mediaToMap(media),
-			"video_size":  len(data),
+			"media":      mediaToMap(media),
+			"video_size": len(data),
 		}}, nil
 	case "file":
 		media, err := cdnUpload(ctx, c.client, creds, data, creds.UserID, protocol.MediaFile)

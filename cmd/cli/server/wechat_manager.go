@@ -47,7 +47,7 @@ type WechatManager struct {
 	cfg       *agent.Agent
 	deps      kernel.Deps
 	wechatCfg *config.WechatConfig // settings.json channels.wechat (may be nil)
-	metaStore session.Store       // session metadata store (nil = no meta tagging)
+	metaStore session.Store        // session metadata store (nil = no meta tagging)
 
 	mu     sync.Mutex
 	lock   *ChannelLock

@@ -209,11 +209,11 @@ func TestSessionNamedToolPrefix(t *testing.T) {
 // names fall back to "mcp".
 func TestSanitizeName(t *testing.T) {
 	cases := map[string]string{
-		"filesystem":  "filesystem",
-		"my server!":  "my-server-",
-		"abc/def":     "abc-def",
+		"filesystem": "filesystem",
+		"my server!": "my-server-",
+		"abc/def":    "abc-def",
 		"中文名":        "---",
-		"":            "mcp",
+		"":           "mcp",
 	}
 	for in, want := range cases {
 		if got := sanitizeName(in); got != want {

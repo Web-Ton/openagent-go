@@ -16,15 +16,15 @@ func mustParse(t *testing.T, expr string) *Schedule {
 
 func TestParseRejectsBadExpressions(t *testing.T) {
 	bad := []string{
-		"", "* * *", "* * * * * *",        // wrong field count
-		"61 * * * *", "* 24 * * *",        // out of range
-		"* * 0 * *", "* * 32 * *",         // dom range
-		"* * * 0 *", "* * * 13 *",         // month range
-		"* * * * 7",                       // dow range
-		"*/0 * * * *",                     // zero step
-		"a * * * *", "1- * * * *",         // garbage
-		"1,,3 * * * *",                    // empty list element
-		"* * * * ",                        // trailing space
+		"", "* * *", "* * * * * *", // wrong field count
+		"61 * * * *", "* 24 * * *", // out of range
+		"* * 0 * *", "* * 32 * *", // dom range
+		"* * * 0 *", "* * * 13 *", // month range
+		"* * * * 7",               // dow range
+		"*/0 * * * *",             // zero step
+		"a * * * *", "1- * * * *", // garbage
+		"1,,3 * * * *", // empty list element
+		"* * * * ",     // trailing space
 	}
 	for _, expr := range bad {
 		if _, err := Parse(expr); err == nil {

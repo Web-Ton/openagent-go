@@ -78,9 +78,9 @@ type StageOutput struct {
 
 // DecisionInput is passed to observer plugins' observe_decision().
 type DecisionInput struct {
-	Layer   string         `json:"layer"`           // decision-layer constant
-	Outcome string         `json:"outcome"`         // decision-value constant
-	Subject string         `json:"subject"`         // what was decided on
+	Layer   string         `json:"layer"`   // decision-layer constant
+	Outcome string         `json:"outcome"` // decision-value constant
+	Subject string         `json:"subject"` // what was decided on
 	Detail  map[string]any `json:"detail,omitempty"`
 	RunID   string         `json:"run_id,omitempty"`  // trajectory grouping key
 	TurnID  int            `json:"turn_id,omitempty"` // turn index (-1 = pre-loop)

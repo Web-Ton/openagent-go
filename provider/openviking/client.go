@@ -202,9 +202,9 @@ type recallRequest struct {
 type recallEntry struct {
 	URI      string  `json:"uri,omitempty"`
 	Score    float64 `json:"score,omitempty"`
-	Type     string  `json:"type,omitempty"`     // events | entities | preferences | experiences
-	Mode     string  `json:"mode,omitempty"`     // full | summary | uri
-	Origin   string  `json:"origin,omitempty"`   // actor_peer | self | other_peer
+	Type     string  `json:"type,omitempty"`   // events | entities | preferences | experiences
+	Mode     string  `json:"mode,omitempty"`   // full | summary | uri
+	Origin   string  `json:"origin,omitempty"` // actor_peer | self | other_peer
 	Content  string  `json:"content,omitempty"`
 	Summary  string  `json:"summary,omitempty"`
 	Abstract string  `json:"abstract,omitempty"`
@@ -213,8 +213,8 @@ type recallEntry struct {
 
 // recallResult mirrors the /api/v1/search/recall response result.
 type recallResult struct {
-	Entries  []recallEntry `json:"entries,omitempty"`
-	Rendered string        `json:"rendered,omitempty"`
+	Entries  []recallEntry  `json:"entries,omitempty"`
+	Rendered string         `json:"rendered,omitempty"`
 	Stats    map[string]any `json:"stats,omitempty"`
 }
 

@@ -21,7 +21,7 @@ func lockFile(f *os.File) error {
 	// convention for "lock the entire file").
 	if err := windows.LockFileEx(windows.Handle(f.Fd()),
 		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
-		0, // reserved
+		0,    // reserved
 		0, 0, // low/high 32 bits of the 64-bit length (0 = whole file)
 		&ol); err != nil {
 		return err

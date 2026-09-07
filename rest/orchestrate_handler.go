@@ -11,8 +11,8 @@ import (
 
 	openagent "github.com/yusheng-g/openagent-go"
 	"github.com/yusheng-g/openagent-go/agent"
-	"github.com/yusheng-g/openagent-go/governance"
 	"github.com/yusheng-g/openagent-go/eventbus"
+	"github.com/yusheng-g/openagent-go/governance"
 	"github.com/yusheng-g/openagent-go/kernel"
 	"github.com/yusheng-g/openagent-go/orchestrate"
 	"github.com/yusheng-g/openagent-go/session"

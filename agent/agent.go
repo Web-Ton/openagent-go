@@ -34,8 +34,8 @@ type Agent struct {
 
 	Model    openagent.Model
 	Prompt   openagent.PromptBuilder // nil = default build prompt
-	InGuard  governance.InputGuard    // nil = no input guard
-	OutGuard governance.OutputGuard   // nil = no output guard
+	InGuard  governance.InputGuard   // nil = no input guard
+	OutGuard governance.OutputGuard  // nil = no output guard
 
 	// Configuration
 	MaxTurns            int // max loop iterations, 0 = default (500)

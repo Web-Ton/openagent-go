@@ -74,21 +74,21 @@ type TextBody struct {
 // EventCallbackBody is the aibot_event_callback payload (interaction
 // events: enter_chat, template_card clicks, ...).
 type EventCallbackBody struct {
-	MsgID      string    `json:"msgid"`
-	BotID      string    `json:"aibotid"`
-	ChatID     string    `json:"chatid,omitempty"`
-	ChatType   string    `json:"chattype,omitempty"`
-	CreateTime int64     `json:"create_time,omitempty"`
-	From       MsgFrom   `json:"from"`
-	MsgType    string    `json:"msgtype"`
-	Event      EventObj  `json:"event"`
+	MsgID      string   `json:"msgid"`
+	BotID      string   `json:"aibotid"`
+	ChatID     string   `json:"chatid,omitempty"`
+	ChatType   string   `json:"chattype,omitempty"`
+	CreateTime int64    `json:"create_time,omitempty"`
+	From       MsgFrom  `json:"from"`
+	MsgType    string   `json:"msgtype"`
+	Event      EventObj `json:"event"`
 }
 
 // EventObj carries the event discriminator and optional template card
 // event payload.
 type EventObj struct {
-	EventType         string               `json:"eventtype"`
-	TemplateCardEvent *TemplateCardEvent   `json:"template_card_event,omitempty"`
+	EventType         string             `json:"eventtype"`
+	TemplateCardEvent *TemplateCardEvent `json:"template_card_event,omitempty"`
 }
 
 // TemplateCardEvent is the payload carried by a template_card_event
@@ -125,11 +125,11 @@ type Ack struct {
 
 // UploadMediaInitBody is the aibot_upload_media_init request payload.
 type UploadMediaInitBody struct {
-	Type        string `json:"type"`           // "file" | "image" | "voice" | "video"
-	Filename    string `json:"filename"`       // display name with extension
-	TotalSize   int    `json:"total_size"`     // file size in bytes
-	TotalChunks int    `json:"total_chunks"`   // number of chunks
-	MD5         string `json:"md5,omitempty"`  // file MD5 hex digest
+	Type        string `json:"type"`          // "file" | "image" | "voice" | "video"
+	Filename    string `json:"filename"`      // display name with extension
+	TotalSize   int    `json:"total_size"`    // file size in bytes
+	TotalChunks int    `json:"total_chunks"`  // number of chunks
+	MD5         string `json:"md5,omitempty"` // file MD5 hex digest
 }
 
 // UploadMediaInitResult is the init response body.

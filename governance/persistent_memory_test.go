@@ -92,9 +92,13 @@ func (s *jsonRoundTripStore) Get(ctx context.Context, id string) (*session.Sessi
 	info.Meta = roundTripJSON(info.Meta)
 	return info, nil
 }
-func (s *jsonRoundTripStore) List(ctx context.Context) ([]session.SessionInfo, error) { return nil, nil }
-func (s *jsonRoundTripStore) Delete(ctx context.Context, id string) error             { return s.inner.Delete(ctx, id) }
-func (s *jsonRoundTripStore) Close() error                                            { return nil }
+func (s *jsonRoundTripStore) List(ctx context.Context) ([]session.SessionInfo, error) {
+	return nil, nil
+}
+func (s *jsonRoundTripStore) Delete(ctx context.Context, id string) error {
+	return s.inner.Delete(ctx, id)
+}
+func (s *jsonRoundTripStore) Close() error { return nil }
 
 func roundTripJSON(v map[string]any) map[string]any {
 	b, err := json.Marshal(v)

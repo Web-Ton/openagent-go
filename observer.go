@@ -187,9 +187,9 @@ const (
 	// instrumented, so the wrapper emits the verdict only.
 	DecisionPolicyCustom = "policy.custom"
 	// context 3 points (context/runtime.go Build).
-	DecisionContextRecall   = "context.recall"    // knowledge recall
-	DecisionContextSkill    = "context.skill"     // skill discover
-	DecisionContextResource = "context.resource"  // resource search
+	DecisionContextRecall   = "context.recall"   // knowledge recall
+	DecisionContextSkill    = "context.skill"    // skill discover
+	DecisionContextResource = "context.resource" // resource search
 	// provider retrieval (provider/memory/sqlite/memory.go).
 	DecisionVectorRecall  = "provider.vector"    // vector cosine recall
 	DecisionKeywordRecall = "provider.keyword"   // keyword LIKE fallback

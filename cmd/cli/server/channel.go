@@ -26,8 +26,8 @@ type ChannelEnv struct {
 	Ctx         context.Context
 	Cfg         *agent.Agent
 	Deps        kernel.Deps
-	DefaultMode string // feishu approval mode ("manual" | "auto"; empty = "manual")
-	WorkDir     string // workspace root for channel-specific tools (feishu SendFile)
+	DefaultMode string        // feishu approval mode ("manual" | "auto"; empty = "manual")
+	WorkDir     string        // workspace root for channel-specific tools (feishu SendFile)
 	MetaStore   session.Store // session metadata store (nil = no meta tagging)
 }
 

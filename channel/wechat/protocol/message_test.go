@@ -77,7 +77,7 @@ func TestBuildTextMessageShape(t *testing.T) {
 		MessageState int    `json:"message_state"`
 		ContextToken string `json:"context_token"`
 		ItemList     []struct {
-			Type     int    `json:"type"`
+			Type     int `json:"type"`
 			TextItem struct {
 				Text string `json:"text"`
 			} `json:"text_item"`

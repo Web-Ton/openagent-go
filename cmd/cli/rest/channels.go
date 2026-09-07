@@ -54,10 +54,10 @@ func Register(mux *http.ServeMux, feishu FeishuChannel, wechat WechatChannel, we
 		case url := <-qrCh:
 			_, img, expireIn := feishu.QR()
 			writeJSON(w, http.StatusAccepted, map[string]any{
-				"status":          "registration",
-				"qr_url":          url,
-				"qr_img_base64":   img,
-				"expires_in":      expireIn,
+				"status":        "registration",
+				"qr_url":        url,
+				"qr_img_base64": img,
+				"expires_in":    expireIn,
 			})
 		case <-r.Context().Done():
 			// Client went away before the URL arrived; the registration

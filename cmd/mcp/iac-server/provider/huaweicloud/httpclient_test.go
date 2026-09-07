@@ -107,27 +107,27 @@ var _ = openagent.ToolResult{}
 // http.Client.Do errors before they reach the LLM context.
 func TestScrubURLError(t *testing.T) {
 	cases := []struct {
-		name   string
-		err    error
-		contains   string
+		name        string
+		err         error
+		contains    string
 		notContains string
 	}{
 		{
 			name:        "url.Error with query secret",
-			err:        &url.Error{Op: "Get", URL: "https://bss.myhuaweicloud.com/v2/bills?token=SECRET&ak=LEAKED", Err: io.EOF},
-			contains:   "https://bss.myhuaweicloud.com/v2/bills",
+			err:         &url.Error{Op: "Get", URL: "https://bss.myhuaweicloud.com/v2/bills?token=SECRET&ak=LEAKED", Err: io.EOF},
+			contains:    "https://bss.myhuaweicloud.com/v2/bills",
 			notContains: "SECRET",
 		},
 		{
 			name:        "url.Error with fragment",
-			err:        &url.Error{Op: "Get", URL: "https://example.com/path#frag", Err: io.EOF},
-			contains:   "https://example.com/path",
+			err:         &url.Error{Op: "Get", URL: "https://example.com/path#frag", Err: io.EOF},
+			contains:    "https://example.com/path",
 			notContains: "frag",
 		},
 		{
 			name:        "non-url.Error passes through",
-			err:        fmt.Errorf("some other error"),
-			contains:   "http_request",
+			err:         fmt.Errorf("some other error"),
+			contains:    "http_request",
 			notContains: "",
 		},
 	}
@@ -155,9 +155,9 @@ func TestIsHuaweiCloudHost(t *testing.T) {
 		"ecs.cn-east-3.myhuaweicloud.com",
 		"bss.myhuaweicloud.cn",
 		"bss.myhuaweicloud.eu",
-		"bss.myhuaweicloud.com:443",  // with port
-		"BSS.MYHUAWEICLOUD.COM",      // case-insensitive
-		"bss.myhuaweicloud.com.",     // FQDN trailing dot
+		"bss.myhuaweicloud.com:443",   // with port
+		"BSS.MYHUAWEICLOUD.COM",       // case-insensitive
+		"bss.myhuaweicloud.com.",      // FQDN trailing dot
 		"bss.myhuaweicloud.com.:8443", // FQDN trailing dot + port
 	}
 	for _, h := range valid {

@@ -21,11 +21,11 @@ import (
 // credentials being present in the environment.
 type mockCloud struct{}
 
-func (mockCloud) Name() string                                           { return "mock" }
-func (mockCloud) Env() map[string]string                                 { return map[string]string{"HW_REGION": "cn-east-3"} }
-func (mockCloud) Skills() fs.FS                                          { return nil }
-func (mockCloud) Agents() map[provider.PromptRole]provider.AgentConfig   { return nil }
-func (mockCloud) ProviderSource() string                                 { return "mock/mock" }
+func (mockCloud) Name() string                                         { return "mock" }
+func (mockCloud) Env() map[string]string                               { return map[string]string{"HW_REGION": "cn-east-3"} }
+func (mockCloud) Skills() fs.FS                                        { return nil }
+func (mockCloud) Agents() map[provider.PromptRole]provider.AgentConfig { return nil }
+func (mockCloud) ProviderSource() string                               { return "mock/mock" }
 
 // TestGetDeploymentStatus_StateV4Address verifies that get_deployment_status
 // synthesizes resource addresses from type.name when the terraform state file
@@ -58,7 +58,7 @@ func TestGetDeploymentStatus_StateV4Address(t *testing.T) {
 
 	var summary struct {
 		ResourceCount int `json:"resource_count"`
-		Resources    []struct {
+		Resources     []struct {
 			Address string `json:"address"`
 			Type    string `json:"type"`
 			Name    string `json:"name"`
@@ -155,6 +155,7 @@ func TestDestroyDeployment_InvalidID(t *testing.T) {
 		}
 	}
 }
+
 // ID sorting — a deployment with terraform.tfstate and tfplan should report
 // both true, and output should be sorted by ID.
 func TestListDeployments_WithStateAndPlan(t *testing.T) {

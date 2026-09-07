@@ -18,12 +18,12 @@ import "io/fs"
 type PromptRole string
 
 const (
-	RoleArchitect     PromptRole = "architect"     // propose_architecture
-	RoleSpecifier     PromptRole = "specifier"     // specify_resources
-	RolePlanner       PromptRole = "planner"       // generate_terraform_plan
-	RolePricer        PromptRole = "pricer"        // estimate_cost
+	RoleArchitect      PromptRole = "architect"      // propose_architecture
+	RoleSpecifier      PromptRole = "specifier"      // specify_resources
+	RolePlanner        PromptRole = "planner"        // generate_terraform_plan
+	RolePricer         PromptRole = "pricer"         // estimate_cost
 	RoleTroubleshooter PromptRole = "troubleshooter" // troubleshoot_deployment
-	RoleQueryer       PromptRole = "queryer"       // query_cloud
+	RoleQueryer        PromptRole = "queryer"        // query_cloud
 )
 
 // AllRoles lists every role the server requires a cloud to provide.

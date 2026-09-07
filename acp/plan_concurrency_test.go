@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sync"
 	"strings"
+	"sync"
 	"testing"
 
 	openagent "github.com/yusheng-g/openagent-go"

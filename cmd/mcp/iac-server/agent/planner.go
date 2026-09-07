@@ -26,10 +26,10 @@ import (
 	"github.com/yusheng-g/openagent-go/agent"
 	"github.com/yusheng-g/openagent-go/cmd/mcp/iac-server/provider"
 	ctxpkg "github.com/yusheng-g/openagent-go/context"
-	"github.com/yusheng-g/openagent-go/mcp"
 	sloghooks "github.com/yusheng-g/openagent-go/hooks/slog"
 	"github.com/yusheng-g/openagent-go/iac"
 	"github.com/yusheng-g/openagent-go/kernel"
+	"github.com/yusheng-g/openagent-go/mcp"
 	"github.com/yusheng-g/openagent-go/provider/skill"
 	"github.com/yusheng-g/openagent-go/session"
 	opentool "github.com/yusheng-g/openagent-go/tool"
@@ -46,9 +46,9 @@ type Planner struct {
 	deploymentsDir  string
 	prompts         map[provider.PromptRole]provider.AgentConfig // cloud-specific agent prompts/skills
 	dryRun          bool
-	binaryMirrors   []string // terraform binary download mirrors
-	providerMirrors []string // provider download mirrors
-	pluginCacheDir  string   // shared provider plugin cache (TF_PLUGIN_CACHE_DIR)
+	binaryMirrors   []string     // terraform binary download mirrors
+	providerMirrors []string     // provider download mirrors
+	pluginCacheDir  string       // shared provider plugin cache (TF_PLUGIN_CACHE_DIR)
 	jobs            *JobManager  // async job execution (per-deployment serialized)
 	jobObs          *jobObserver // streams model output into job logs
 }

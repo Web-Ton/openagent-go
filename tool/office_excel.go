@@ -65,8 +65,8 @@ type excelWriteTool struct {
 }
 
 type excelWriteParams struct {
-	Path string `json:"path" jsonschema:"description=Output path for the .xlsx file. Relative paths resolve to the workspace directory."`
-	Data string `json:"data" jsonschema:"description=CSV-formatted text: rows separated by newlines, cells by commas. Quoted fields with embedded commas or newlines are supported."`
+	Path  string `json:"path" jsonschema:"description=Output path for the .xlsx file. Relative paths resolve to the workspace directory."`
+	Data  string `json:"data" jsonschema:"description=CSV-formatted text: rows separated by newlines, cells by commas. Quoted fields with embedded commas or newlines are supported."`
 	Sheet string `json:"sheet,omitempty" jsonschema:"description=Sheet name (default: Sheet1)"`
 }
 

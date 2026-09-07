@@ -31,7 +31,7 @@ func TestQRFlow(t *testing.T) {
 				return
 			}
 			json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
-				"status": "success",
+				"status":   "success",
 				"bot_info": map[string]any{"botid": "bot-1", "secret": "sec-1"},
 			}})
 		}

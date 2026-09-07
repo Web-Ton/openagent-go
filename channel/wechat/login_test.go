@@ -17,11 +17,11 @@ import (
 // status responses consumed in order per poll; get_bot_qrcode returns a
 // fresh qrcode each call.
 type fakeILink struct {
-	mu       sync.Mutex
-	statuses []string           // remaining status queue ("" = error)
+	mu               sync.Mutex
+	statuses         []string          // remaining status queue ("" = error)
 	statusesByVerify map[string]string // verify_code → status (verified code path)
-	qrcodes  int
-	baseURL  string // host to redirect to (scaned_but_redirect)
+	qrcodes          int
+	baseURL          string // host to redirect to (scaned_but_redirect)
 }
 
 func newFakeILink(statuses ...string) *fakeILink {

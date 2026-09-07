@@ -64,10 +64,10 @@ func TestToIncomingEmptyIgnored(t *testing.T) {
 func TestToIncomingVideoMarkerOnly(t *testing.T) {
 	ch := New(&protocol.Credentials{}, t.TempDir())
 	wire := &protocol.WireMessage{
-		MessageID:   9,
-		FromUserID:  "u",
+		MessageID:    9,
+		FromUserID:   "u",
 		CreateTimeMs: 1,
-		MessageType: protocol.MessageTypeUser,
+		MessageType:  protocol.MessageTypeUser,
 		ContextToken: "c",
 		ItemList: []protocol.MessageItem{
 			{Type: protocol.ItemVideo, VideoItem: &protocol.VideoItem{Media: &protocol.CDNMedia{EncryptQueryParam: "x", AESKey: "k"}}},
@@ -114,10 +114,10 @@ func TestToIncomingMediaDownload(t *testing.T) {
 	ch := New(&protocol.Credentials{}, mediaDir)
 
 	wire := &protocol.WireMessage{
-		MessageID:   7,
-		FromUserID:  "user-1",
+		MessageID:    7,
+		FromUserID:   "user-1",
 		CreateTimeMs: 1,
-		MessageType: protocol.MessageTypeUser,
+		MessageType:  protocol.MessageTypeUser,
 		ContextToken: "c",
 		ItemList: []protocol.MessageItem{
 			{Type: protocol.ItemImage, ImageItem: &protocol.ImageItem{
@@ -156,10 +156,10 @@ func TestToIncomingMediaDownloadFailureDegrades(t *testing.T) {
 	// No CDN server — the download fails and the marker has no path.
 	ch := New(&protocol.Credentials{}, t.TempDir())
 	wire := &protocol.WireMessage{
-		MessageID:   1,
-		FromUserID:  "u",
+		MessageID:    1,
+		FromUserID:   "u",
 		CreateTimeMs: 1,
-		MessageType: protocol.MessageTypeUser,
+		MessageType:  protocol.MessageTypeUser,
 		ContextToken: "c",
 		ItemList: []protocol.MessageItem{
 			{Type: protocol.ItemImage, ImageItem: &protocol.ImageItem{

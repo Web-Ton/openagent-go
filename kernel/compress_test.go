@@ -17,8 +17,8 @@ import (
 type fakeCompressor struct {
 	mu       sync.Mutex
 	cc       *openagent.CompressedContext
-	compactN int   // number of Compact calls
-	cutoff   int   // last cutoff passed to Compact
+	compactN int // number of Compact calls
+	cutoff   int // last cutoff passed to Compact
 }
 
 func (f *fakeCompressor) Compact(_ context.Context, _ string, throughIndex int, _ []openagent.Message) error {
@@ -72,9 +72,9 @@ func TestCompressAll_StampedRunInfoAndSession(t *testing.T) {
 	// "gpt-4" fallback. We assert RunID/SessionID, not token counts.
 	cfg := agent.New("test", agent.WithMaxTurns(1))
 	deps := Deps{
-		Observer:      cap,
-		SessionStore:  store,
-		Compressor:    comp,
+		Observer:     cap,
+		SessionStore: store,
+		Compressor:   comp,
 	}
 	rt := New(cfg, deps)
 

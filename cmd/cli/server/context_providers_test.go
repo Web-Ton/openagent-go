@@ -121,4 +121,3 @@ func TestApplyContextProviders_CustomRecallConfig(t *testing.T) {
 		t.Errorf("recall experiences quota = %d, want 1", rc.Quotas["experiences"])
 	}
 }
-

@@ -15,8 +15,8 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 	for _, plain := range [][]byte{
 		[]byte("hello"),
 		[]byte(""),
-		bytes.Repeat([]byte("a"), 16),  // exactly one block
-		bytes.Repeat([]byte("b"), 17),  // one block + 1
+		bytes.Repeat([]byte("a"), 16),   // exactly one block
+		bytes.Repeat([]byte("b"), 17),   // one block + 1
 		bytes.Repeat([]byte("c"), 4096), // many blocks
 	} {
 		ct, err := EncryptAESECB(plain, key)

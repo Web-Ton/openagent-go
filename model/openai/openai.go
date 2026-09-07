@@ -140,6 +140,7 @@ func parsePerMillionPrice(s string) float64 {
 	}
 	return f
 }
+
 // TokenizerModel returns a tiktoken-encodable canonical name for the
 // model, not the user-assigned model ID (which tiktoken cannot map).
 // o1/o3 reasoning models use the o200k encoding; everything else uses

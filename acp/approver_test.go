@@ -220,4 +220,3 @@ func TestApproverNoClientDenies(t *testing.T) {
 		t.Fatalf("action = %s, want Deny (no client)", d.Action)
 	}
 }
-

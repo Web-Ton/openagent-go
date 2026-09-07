@@ -38,9 +38,9 @@ import (
 type JobStatus string
 
 const (
-	JobRunning  JobStatus = "running"
-	JobDone     JobStatus = "done"
-	JobFailed   JobStatus = "failed"
+	JobRunning   JobStatus = "running"
+	JobDone      JobStatus = "done"
+	JobFailed    JobStatus = "failed"
 	JobCancelled JobStatus = "cancelled"
 )
 

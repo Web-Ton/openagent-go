@@ -362,9 +362,9 @@ func (c *Channel) buildReply(reqID string, cb *MsgCallbackBody) channel.ReplyFun
 // ── Media upload + send ──
 
 const (
-	uploadChunkSize      = 512 * 1024     // 512KB before base64
-	uploadMaxChunks      = 100            // ~50MB limit
-	uploadRetryMax       = 2              // per-chunk retry count
+	uploadChunkSize      = 512 * 1024 // 512KB before base64
+	uploadMaxChunks      = 100        // ~50MB limit
+	uploadRetryMax       = 2          // per-chunk retry count
 	uploadRetryBaseDelay = 500 * time.Millisecond
 	uploadTimeout        = 30 * time.Second
 )

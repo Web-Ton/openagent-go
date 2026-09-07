@@ -767,14 +767,14 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Keep the input text so nothing is lost.
 						return m, nil
 					}
-				m.inputQueue = append(m.inputQueue, text)
-				m.promptCount++
-				m.closeTrailingThought()
-				m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId})
-				m.chatTextarea.SetValue("")
-				m.viewportDirty = true
-				m.statusText = fmt.Sprintf("[Queued:%d] waiting for the agent...", len(m.inputQueue))
-				return m, nil
+					m.inputQueue = append(m.inputQueue, text)
+					m.promptCount++
+					m.closeTrailingThought()
+					m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId})
+					m.chatTextarea.SetValue("")
+					m.viewportDirty = true
+					m.statusText = fmt.Sprintf("[Queued:%d] waiting for the agent...", len(m.inputQueue))
+					return m, nil
 				}
 				// User message → transcript, then async Prompt to ACP.
 				m.promptCount++
@@ -2173,10 +2173,10 @@ func (m *Model) renderMessageBlock(i int, msg ChatMessage, vpW int) (block strin
 	}
 	e := renderCacheEntry{
 		vpW: vpW, loading: m.loading,
-		expandThink: m.visibleConfig.ExpandThinking,
-		showSkill:   m.visibleConfig.ShowToolSkill,
-		showShell:   m.visibleConfig.ShowToolShell,
-		showDetail:  m.visibleConfig.ShowToolDetail,
+		expandThink:  m.visibleConfig.ExpandThinking,
+		showSkill:    m.visibleConfig.ShowToolSkill,
+		showShell:    m.visibleConfig.ShowToolShell,
+		showDetail:   m.visibleConfig.ShowToolDetail,
 		thoughtStart: msg.ThoughtStart,
 		thoughtEnd:   msg.ThoughtEnd,
 		role:         msg.Role, content: msg.Content,

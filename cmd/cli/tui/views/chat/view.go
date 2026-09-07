@@ -2,10 +2,10 @@ package chat
 
 import (
 	"fmt"
-	"strconv"
-	"time"
 	"image/color"
+	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"

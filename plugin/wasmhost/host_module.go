@@ -130,12 +130,12 @@ func (h *HostAPI) RegisterHostModule(ctx context.Context, rt wazero.Runtime) err
 			}
 			raw := read(mod, jsonPtr, jsonLen)
 			var req struct {
-				Cmd       string            `json:"cmd"`
-				Args      []string          `json:"args"`
-				Cwd       string            `json:"cwd"`
-				Env       map[string]string `json:"env"`
-				EnvReplace bool             `json:"env_replace"`
-				TimeoutMS int               `json:"timeout_ms"`
+				Cmd        string            `json:"cmd"`
+				Args       []string          `json:"args"`
+				Cwd        string            `json:"cwd"`
+				Env        map[string]string `json:"env"`
+				EnvReplace bool              `json:"env_replace"`
+				TimeoutMS  int               `json:"timeout_ms"`
 			}
 			if err := json.Unmarshal([]byte(raw), &req); err != nil {
 				return writeJSON(ctx, mod, map[string]string{"error": fmt.Sprintf("invalid exec request: %v", err)})
@@ -531,12 +531,12 @@ func (h *HostAPI) runtimeSetModelConfig(ctx context.Context, mod api.Module, raw
 		return WriteString(ctx, mod, b)
 	}
 	var mc struct {
-		Provider       string `json:"provider"`
-		ModelID        string `json:"model_id"`
-		APIKey         string `json:"api_key"`
-		BaseURL        string `json:"base_url"`
-		MaxInputTokens int    `json:"max_input_tokens"`
-		MaxOutputTokens int   `json:"max_output_tokens"`
+		Provider        string `json:"provider"`
+		ModelID         string `json:"model_id"`
+		APIKey          string `json:"api_key"`
+		BaseURL         string `json:"base_url"`
+		MaxInputTokens  int    `json:"max_input_tokens"`
+		MaxOutputTokens int    `json:"max_output_tokens"`
 	}
 	if err := json.Unmarshal([]byte(raw), &mc); err != nil {
 		b, _ := json.Marshal(map[string]string{"error": err.Error()})
