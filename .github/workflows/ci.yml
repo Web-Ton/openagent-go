@@ -22,6 +22,7 @@ jobs:
 
       - name: Gofmt
         run: |
+          set +e
           unformatted=$(gofmt -l . | grep -v vendor | grep -v third_party)
           if [ -n "$unformatted" ]; then
             echo "::error::Files need gofmt:"

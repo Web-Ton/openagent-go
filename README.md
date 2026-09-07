@@ -3,6 +3,7 @@
 
   An AI agent runtime kernel in Go — pluggable, sandboxed, ACP-native.
 
+  [![CI](https://github.com/yusheng-g/openagent-go/actions/workflows/ci.yml/badge.svg)](https://github.com/yusheng-g/openagent-go/actions/workflows/ci.yml)
   [![Go Reference](https://pkg.go.dev/badge/github.com/yusheng-g/openagent-go.svg)](https://pkg.go.dev/github.com/yusheng-g/openagent-go)
   [![Go Report Card](https://goreportcard.com/badge/github.com/yusheng-g/openagent-go)](https://goreportcard.com/report/github.com/yusheng-g/openagent-go)
   [![GitHub Stars](https://img.shields.io/github/stars/yusheng-g/openagent-go?style=social)](https://github.com/yusheng-g/openagent-go/stargazers)
