@@ -126,7 +126,7 @@ func (m *Model) renderLeft(geom *viewGeom) string {
 		inputArea = m.renderPermissionPanel(m.getContentWidth()-1, 0)
 		vpHeight := m.chatViewport.Height()
 		sb := m.renderScrollbar(vpHeight)
-		scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.chatViewport.View(), sb)
+		scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.chatViewport.View(), m.renderScrollbarGap(vpHeight), sb)
 		status := m.renderStatus()
 		return theme.BaseStyle().Width(leftW).Padding(0, 1).Render(
 			lipgloss.JoinVertical(lipgloss.Left, scrollContainer, inputArea, status),
@@ -140,7 +140,7 @@ func (m *Model) renderLeft(geom *viewGeom) string {
 		splitH := m.chatViewport.Height()
 		ctxH := vpH - splitH
 		sb := m.renderScrollbar(splitH)
-		scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.chatViewport.View(), sb)
+		scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.chatViewport.View(), m.renderScrollbarGap(splitH), sb)
 		ctxPane := m.renderSplitPane(ctxH)
 		inputArea = m.renderInput()
 		status := m.renderStatus()
@@ -153,7 +153,7 @@ func (m *Model) renderLeft(geom *viewGeom) string {
 	// Normal: full-height viewport + input + status.
 	vpHeight := m.chatViewport.Height()
 	sb := m.renderScrollbar(vpHeight)
-	scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.chatViewport.View(), sb)
+	scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.chatViewport.View(), m.renderScrollbarGap(vpHeight), sb)
 	inputArea = m.renderInput()
 	status := m.renderStatus()
 	geom.inputTopY = vpH + 1 // viewport + blank row, split or not
@@ -279,21 +279,11 @@ func joinBadges(parts ...string) string {
 }
 
 // renderModeBadge shows the agent's session mode as the input header's
-// first badge, adapting to the modes the agent actually defines: Auto
-// (fully automated) in the theme primary, Manual (approval required) in
-// green, Plan (read-only, plan-first) in cyan. Empty (config options not
-// yet fetched) renders no badge at all.
+// first badge (label + color from modeBadge). Empty (config options not yet
+// fetched) renders no badge at all.
 func (m *Model) renderModeBadge() string {
-	var label string
-	var col color.Color
-	switch m.mode {
-	case "auto":
-		label, col = "Auto", theme.Primary
-	case "manual":
-		label, col = "Manual", theme.Success
-	case "plan":
-		label, col = "Plan", theme.Notify
-	default:
+	label, col := m.modeBadge()
+	if label == "" {
 		return ""
 	}
 	return theme.BaseStyle().Background(theme.BgSurface).Foreground(col).Render(label)
@@ -456,6 +446,22 @@ func (m *Model) renderRight() string {
 	space := strings.Repeat("\n", spacesH)
 	return rightStyle.
 		Render(lipgloss.JoinVertical(lipgloss.Left, header, space, footer))
+}
+
+// renderScrollbarGap renders the one-column page-background strip between
+// the transcript viewport and the scrollbar, so message blocks never touch
+// the bar (the viewport width already reserves this column via
+// layout.GetTranscriptWidth).
+func (m *Model) renderScrollbarGap(height int) string {
+	if height <= 0 {
+		return ""
+	}
+	cell := theme.BaseStyle().Render(" ")
+	lines := make([]string, height)
+	for i := range lines {
+		lines[i] = cell
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *Model) renderScrollbar(height int) string {

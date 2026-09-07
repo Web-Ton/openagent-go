@@ -31,6 +31,13 @@ func placeholderRow(vpW int) string {
 		Foreground(theme.TextMute).Render(rail + strings.Repeat(" ", max(0, vpW-utils.DisplayWidth(rail))))
 }
 
+// padRow is a blank full-width page-background row used for the transcript's
+// top padding (layout.TranscriptTopPad) — breathing room above the first
+// message block.
+func padRow(vpW int) string {
+	return theme.BaseStyle().Render(strings.Repeat(" ", max(0, vpW)))
+}
+
 // fitRow normalizes an (ANSI-styled) transcript row to exactly vpW columns.
 // bubbles viewport soft-wraps any row wider than its content width, which
 // would shift its line↔row mapping away from our virtual window offsets;
@@ -68,11 +75,13 @@ func (m *Model) virtualLineHeights(vpW int) []int {
 	return h
 }
 
-// virtualPrefixLines returns the sum of rendered rows before message idx,
-// i.e. the content line at which the message starts.
+// virtualPrefixLines returns the document row at which message idx starts:
+// the transcript's top pad plus the sum of rendered rows before it. The
+// viewport's YOffset lives in these document coordinates, so scroll-to-
+// message jumps can use the value directly.
 func (m *Model) virtualPrefixLines(idx int) int {
-	vpW := layout.GetViewWidth(m.width)
-	n := 0
+	vpW := layout.GetTranscriptWidth(m.width)
+	n := layout.TranscriptTopPad
 	for i, h := range m.virtualLineHeights(vpW) {
 		if i >= idx {
 			break
@@ -135,19 +144,31 @@ func (m *Model) renderVirtualDoc(height int) string {
 // renderVirtualDocAt is renderVirtualDoc for an explicit window offset —
 // search jumps must feed a document whose styled window is the destination
 // before SetYOffset clamps there.
+//
+// The document is [pad rows][message rows]; the viewport window lives in
+// document coordinates, so the message windowing runs shifted by the pad:
+// message row k is visible iff pad+k ∈ [offset, offset+height).
 func (m *Model) renderVirtualDocAt(height, offset int) string {
-	vpW := layout.GetViewWidth(m.width)
+	vpW := layout.GetTranscriptWidth(m.width)
 	if len(m.messages) == 0 {
 		return ""
 	}
 	heights := m.virtualLineHeights(vpW)
 	offset = max(0, offset)
 	windowH := max(1, height)
-	windowEnd := offset + windowH
-	first, startWithin := messageAtLine(heights, offset)
-	last, _ := messageAtLine(heights, max(0, windowEnd-1))
+	pad := layout.TranscriptTopPad
+	msgWinStart := offset - pad // message-coordinate window start (may be negative)
+	msgWinEnd := msgWinStart + windowH
+	first, startWithin := messageAtLine(heights, max(0, msgWinStart))
+	last, _ := messageAtLine(heights, max(0, msgWinEnd-1))
 
 	var b strings.Builder
+	emitPad := func(rows int) {
+		for r := 0; r < rows; r++ {
+			b.WriteString(padRow(vpW))
+			b.WriteByte('\n')
+		}
+	}
 	emitPlaceholder := func(rows int) {
 		for r := 0; r < rows; r++ {
 			b.WriteString(placeholderRow(vpW))
@@ -155,7 +176,14 @@ func (m *Model) renderVirtualDocAt(height, offset int) string {
 		}
 	}
 
-	// Rows above the window.
+	// Top pad rows — always emitted so the doc's row count and the scroll
+	// mapping include them; visible only when the window reaches row 0.
+	emitPad(pad)
+
+	// Message rows. `cursor` is the message-coordinate row of message
+	// `first`'s row 0; negative when the window starts inside the pad.
+	cursor := msgWinStart - startWithin
+	// Rows of messages before `first` (all above the window): placeholders.
 	above := 0
 	for i := 0; i < first; i++ {
 		above += heights[i]
@@ -164,7 +192,6 @@ func (m *Model) renderVirtualDocAt(height, offset int) string {
 
 	// Window messages: real block rows where visible, placeholders where
 	// the window clips the message's estimated range or styling is gated.
-	cursor := offset - startWithin // absolute row of the first message's row 0
 	for i := first; i <= last; i++ {
 		block, skip := m.renderMessageBlock(i, m.messages[i], vpW)
 		var lines []string
@@ -173,7 +200,7 @@ func (m *Model) renderVirtualDocAt(height, offset int) string {
 		}
 		for r := 0; r < heights[i]; r++ {
 			abs := cursor + r
-			if abs < offset || abs >= windowEnd || skip || r >= len(lines) {
+			if abs < msgWinStart || abs >= msgWinEnd || skip || r >= len(lines) {
 				b.WriteString(placeholderRow(vpW))
 			} else {
 				b.WriteString(fitRow(lines[r], vpW))
