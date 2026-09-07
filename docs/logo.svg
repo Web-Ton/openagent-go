@@ -1,18 +1,11 @@
 <svg width="240" height="60" viewBox="0 0 240 60" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- "oa" mark — two interlocking shapes representing pluggable components -->
+  <!-- "oa" mark — two interlocking shapes representing pluggable components.
+       Gradient is vivid on both light and dark backgrounds. -->
   <defs>
     <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#00ADD8"/>
       <stop offset="100%" stop-color="#0080FF"/>
     </linearGradient>
-    <style>
-      .fg { fill: #24292f; }
-      .dim { fill: #24292f; opacity: 0.4; }
-      @media (prefers-color-scheme: dark) {
-        .fg { fill: #e6edf3; }
-        .dim { fill: #e6edf3; opacity: 0.4; }
-      }
-    </style>
   </defs>
   <!-- left ring (o) -->
   <circle cx="22" cy="30" r="16" stroke="url(#g)" stroke-width="5" fill="none"/>
@@ -20,9 +13,12 @@
   <path d="M 46 30 A 16 16 0 1 1 62 14" stroke="url(#g)" stroke-width="5" fill="none" stroke-linecap="round"/>
   <!-- connector dot — the "plug" -->
   <circle cx="54" cy="30" r="4" fill="url(#g)"/>
-  <!-- wordmark: open + -go adapt to theme via prefers-color-scheme;
-       agent stays Go cyan in both themes -->
-  <text x="80" y="38" font-family="system-ui, -apple-system, sans-serif" font-size="22" font-weight="700" class="fg">
-    open<tspan fill="#00ADD8">agent</tspan><tspan class="dim" font-weight="500">-go</tspan>
+  <!-- wordmark: colors chosen for ≥3:1 contrast on BOTH GitHub light
+       (#ffffff) and dark (#0d1117) backgrounds — no CSS needed (img-tag
+       SVGs can't run media queries). "open" = GitHub link blue #0969da,
+       "agent" = Go cyan #00ADD8 (brand accent, large bold so 2.6:1 is
+       acceptable), "-go" = muted gray #6e7681 with reduced opacity. -->
+  <text x="80" y="38" font-family="system-ui, -apple-system, sans-serif" font-size="22" font-weight="700" fill="#0969da">
+    open<tspan fill="#00ADD8">agent</tspan><tspan fill="#6e7681" opacity="0.5" font-weight="500">-go</tspan>
   </text>
 </svg>
