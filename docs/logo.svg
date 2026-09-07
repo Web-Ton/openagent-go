@@ -1,4 +1,4 @@
-<svg width="240" height="60" viewBox="0 0 240 60" fill="none" xmlns="http://www.w3.org/2000/svg">
+<svg width="320" height="80" viewBox="0 0 210 60" fill="none" xmlns="http://www.w3.org/2000/svg">
   <!-- "oa" mark — two interlocking shapes representing pluggable components.
        Gradient is vivid on both light and dark backgrounds. -->
   <defs>
@@ -8,17 +8,17 @@
     </linearGradient>
   </defs>
   <!-- left ring (o) -->
-  <circle cx="22" cy="30" r="16" stroke="url(#g)" stroke-width="5" fill="none"/>
+  <circle cx="14" cy="30" r="10" stroke="url(#g)" stroke-width="4" fill="none"/>
   <!-- right arc (a) — open ring suggesting pluggability -->
-  <path d="M 46 30 A 16 16 0 1 1 62 14" stroke="url(#g)" stroke-width="5" fill="none" stroke-linecap="round"/>
+  <path d="M 30 30 A 10 10 0 1 1 40 20" stroke="url(#g)" stroke-width="4" fill="none" stroke-linecap="round"/>
   <!-- connector dot — the "plug" -->
-  <circle cx="54" cy="30" r="4" fill="url(#g)"/>
+  <circle cx="36" cy="30" r="3" fill="url(#g)"/>
   <!-- wordmark: colors chosen for ≥3:1 contrast on BOTH GitHub light
        (#ffffff) and dark (#0d1117) backgrounds — no CSS needed (img-tag
        SVGs can't run media queries). "open" = GitHub link blue #0969da,
        "agent" = Go cyan #00ADD8 (brand accent, large bold so 2.6:1 is
        acceptable), "-go" = muted gray #6e7681 with reduced opacity. -->
-  <text x="80" y="38" font-family="system-ui, -apple-system, sans-serif" font-size="22" font-weight="700" fill="#0969da">
+  <text x="50" y="38" font-family="system-ui, -apple-system, sans-serif" font-size="22" font-weight="700" fill="#0969da">
     open<tspan fill="#00ADD8">agent</tspan><tspan fill="#6e7681" opacity="0.5" font-weight="500">-go</tspan>
   </text>
 </svg>

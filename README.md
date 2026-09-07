@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/logo.svg" alt="openagent-go" width="240">
+  <img src="docs/logo.svg" alt="openagent-go" width="320">
 
   An AI agent runtime kernel in Go — pluggable, sandboxed, ACP-native.
 

@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/logo.svg" alt="openagent-go" width="240">
+  <img src="docs/logo.svg" alt="openagent-go" width="320">
 
   Go 语言实现的 AI Agent 运行时内核 — 可插拔、沙箱隔离、原生 ACP 协议。
 
