@@ -507,8 +507,9 @@ func explorerSubAgent() agent.SubAgent {
 	return agent.SubAgent{
 		Name: "explorer",
 		Description: "Survey and organize LOCAL information — anything already present on disk. " +
-			"Delegate ONLY when the task needs to survey multiple local sources and synthesize " +
-			"an organized picture; for a single-source lookup, do it directly. " +
+			"Delegate when the task spans multiple sources or requires synthesis across them. " +
+			"When unsure about scope, assess it first (e.g. list the area) — if it exceeds a handful of items, prefer delegation. " +
+			"For a single-item lookup, do it directly. " +
 			"Read-only.",
 		SystemPrompt: `You are a local-information collection sub-agent. Your job is to locate, gather, and organize information that already exists locally — never to modify anything.
 
@@ -545,8 +546,9 @@ func researcherSubAgent() agent.SubAgent {
 	return agent.SubAgent{
 		Name: "researcher",
 		Description: "Research and synthesize EXTERNAL information from the web. " +
-			"Delegate ONLY when the task needs multiple searches or cross-source verification " +
-			"whose intermediate content would bloat context; for a single lookup, do it directly. " +
+			"Delegate when the task needs multiple searches or cross-source verification. " +
+			"When unsure about scope, run a quick search first — if results are dense or span many sources, prefer delegation. " +
+			"For a single lookup, do it directly. " +
 			"Read-only.",
 		SystemPrompt: `You are a research sub-agent. Your job is to gather information from the web, cross-verify across sources, and synthesize a grounded summary — never to modify files.
 
@@ -589,8 +591,9 @@ func reviewerSubAgent() agent.SubAgent {
 		Name: "reviewer",
 		Description: "Evaluate content and surface problems — errors, inconsistencies, gaps, " +
 			"quality issues in any artifact. " +
-			"Delegate ONLY when the review needs a structured issue list across content " +
-			"that would be costly to examine inline; for a quick check, do it directly. " +
+			"Delegate when the review needs a structured issue list across content that would be costly to examine inline. " +
+			"When unsure about scope, skim the items first — if there's substantial ground to cover, prefer delegation. " +
+			"For a quick single-item check, do it directly. " +
 			"Read-only.",
 		SystemPrompt: `You are an independent-audit sub-agent. Your job is to re-examine the original material within the scope set by the parent and report problems — never to modify anything. You form your own judgment from the source, not from a gatherer's summary.
 
