@@ -189,7 +189,9 @@ type Model struct {
 	// re-styles only the chunk that changed, and toggles/width changes are
 	// picked up by the fingerprint. Keyed by message index; entries are
 	// dropped automatically once they exceed the message count.
-	renderCache map[int]renderCacheEntry
+	renderCache map[int64]renderCacheEntry
+	// renderSeq hands out ChatMessage.Seq identities (see ChatMessage.Seq).
+	renderSeq int64
 
 	// fedOffset/fedHeight remember the window the viewport content was last
 	// built for, so the virtual scroll refeeds (styling newly revealed
@@ -410,6 +412,13 @@ type ChatMessage struct {
 	CompactedMsgs int
 	FreedTokens   int
 	CompactError  string
+
+	// Seq is a model-scoped identity assigned on first render. The render
+	// cache keys on it: a transcript at the in-memory cap drops its oldest
+	// rows on every append, which shifts all slice indices — an index key
+	// invalidates the whole cache per streamed chunk (a full multi-MB
+	// restyle), while the seq rides stably through the shift.
+	Seq int64
 }
 
 // tool status markers rendered in the transcript.
@@ -1403,6 +1412,11 @@ func (m *Model) trimMessageStore() {
 		drop++
 	}
 	if drop > 0 {
+		for k := 0; k < drop; k++ {
+			if s := m.messages[k].Seq; s != 0 {
+				delete(m.renderCache, s)
+			}
+		}
 		m.messages = m.messages[drop:]
 	}
 }
@@ -1555,6 +1569,8 @@ func (m *Model) executeCommand(pc panelCommand) (tea.Model, tea.Cmd) {
 		}
 		m.activeSessionID = ""
 		m.messages = nil
+		m.renderCache = nil
+		m.renderSeq = 0
 		m.inputQueue = nil
 		m.pendingConfigSet = nil
 		m.usedTokens, m.contextSize, m.promptCount = 0, 0, 0
@@ -2304,10 +2320,17 @@ func renderCacheHits(e renderCacheEntry, msg ChatMessage, vpW int, loading, repl
 // duration) under the block, separated by a blank row on each side.
 func (m *Model) renderMessageBlock(i int, msg ChatMessage, vpW int) (block string, skip bool) {
 	if m.renderCache == nil {
-		m.renderCache = make(map[int]renderCacheEntry)
+		m.renderCache = make(map[int64]renderCacheEntry)
+	}
+	if msg.Seq == 0 {
+		m.renderSeq++
+		msg.Seq = m.renderSeq
+		if i >= 0 && i < len(m.messages) {
+			m.messages[i].Seq = msg.Seq
+		}
 	}
 	turnEnd := m.isTurnEndAt(i, msg)
-	if e, ok := m.renderCache[i]; ok &&
+	if e, ok := m.renderCache[msg.Seq]; ok &&
 		renderCacheHits(e, msg, vpW, m.loading, m.replaying, turnEnd, m.visibleConfig) {
 		return e.block, e.skip
 	}
@@ -2337,7 +2360,7 @@ func (m *Model) renderMessageBlock(i int, msg ChatMessage, vpW int) (block strin
 		// between blocks contributes the boundary).
 		e.block = e.block + "\n" + m.turnEndMarkerRow(i, msg, vpW) + "\n"
 	}
-	m.renderCache[i] = e
+	m.renderCache[msg.Seq] = e
 	return e.block, e.skip
 }
 

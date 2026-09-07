@@ -3,6 +3,9 @@ package chat
 import (
 	"strings"
 	"testing"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 // mkMarkdown builds a markdown document that mixes styled elements
@@ -148,5 +151,106 @@ func BenchmarkVirtualWindow1M(b *testing.B) {
 		if out := m.renderVirtualDocAt(30, 5_000); out == "" {
 			b.Fatal("empty render")
 		}
+	}
+}
+
+// ── 1M-token context: interactive latency through the real Update path ──
+
+// fillToContextCap stuffs the transcript to the in-memory cap
+// (maxStoredChars ≈ 2MB ≈ a 1M-token context) with a realistic role mix:
+// user prompts, markdown answers, thoughts, and tool rows with outputs.
+func fillToContextCap(m *Model) {
+	block := mkMarkdown(900)
+	m.messages = m.messages[:0]
+	total := 0
+	for i := 0; total < maxStoredChars; i++ {
+		switch i % 5 {
+		case 0:
+			m.messages = append(m.messages, ChatMessage{Role: "user", Content: "帮我分析一下这段代码的并发安全问题", TurnId: int64(i), CreatedAt: todayAt(10, i%60)})
+		case 1:
+			m.messages = append(m.messages, ChatMessage{Role: "thought", Content: block, TurnId: int64(i)})
+		case 2:
+			m.messages = append(m.messages, ChatMessage{Role: "tool", ToolName: "read src/async.go", ToolStatus: toolDone, ToolInput: `{"path":"src/async.go"}`, ToolOutput: block, TurnId: int64(i)})
+		default:
+			m.messages = append(m.messages, ChatMessage{Role: "assistant", Content: block, TurnId: int64(i), CreatedAt: todayAt(10, i%60)})
+		}
+		total += len(block)
+	}
+}
+
+// latencyBudget fails the test when d exceeds limit; it always logs the
+// measured value so runs document the actual headroom.
+func latencyBudget(t *testing.T, what string, d time.Duration, limit time.Duration) {
+	t.Helper()
+	t.Logf("%-28s %8v (budget %v)", what, d.Round(time.Millisecond), limit)
+	if d > limit {
+		t.Errorf("%s took %v, budget %v", what, d, limit)
+	}
+}
+
+// TestInteractiveLatencyAtContextCap drives the real Update/View path with
+// the transcript stuffed to the in-memory cap and asserts every interactive
+// path stays snappy: first paint, frame assembly, a streaming chunk plus
+// its throttled flush, scrolling into uncached territory, and the worst
+// streaming case — a long reply re-styling as it grows.
+func TestInteractiveLatencyAtContextCap(t *testing.T) {
+	m := newBenchModel()
+	m.inChat = true
+	fillToContextCap(m)
+
+	start := time.Now()
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	latencyBudget(t, "first paint (resize)", time.Since(start), 500*time.Millisecond)
+
+	start = time.Now()
+	if v := m.View(); v.Content == "" {
+		t.Fatal("empty view")
+	}
+	latencyBudget(t, "frame assembly (View)", time.Since(start), 150*time.Millisecond)
+
+	// A streaming chunk lands while pinned to the bottom, then the
+	// throttled flush fires.
+	m.needAutoScroll = true
+	start = time.Now()
+	m.Update(agentMessageMsg{text: mkMarkdown(4_000)})
+	latencyBudget(t, "stream chunk (Update)", time.Since(start), 100*time.Millisecond)
+	start = time.Now()
+	m.Update(flushViewportMsg{})
+	latencyBudget(t, "throttled flush", time.Since(start), 100*time.Millisecond)
+
+	// PageUp into fresh (uncached) territory: the newly revealed rows style
+	// on demand.
+	m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	start = time.Now()
+	m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	latencyBudget(t, "PageUp (uncached rows)", time.Since(start), 200*time.Millisecond)
+
+	// Worst streaming case: one long reply re-styling as it grows —
+	// ten 1KB chunks appended to an already-100KB assistant message; each
+	// chunk restyles the whole growing block and refeeds the window.
+	var long strings.Builder
+	long.WriteString(mkMarkdown(100_000))
+	m.messages = append(m.messages, ChatMessage{Role: "assistant", Content: long.String(), TurnId: 999999})
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40}) // re-sync at the new tail
+	worst := time.Duration(0)
+	for i := 0; i < 10; i++ {
+		s := time.Now()
+		m.Update(agentMessageMsg{text: mkMarkdown(1_000)})
+		if d := time.Since(s); d > worst {
+			worst = d
+		}
+	}
+	latencyBudget(t, "long-reply chunk (100KB)", worst, 200*time.Millisecond)
+}
+
+func BenchmarkStreamChunkAtCap(b *testing.B) {
+	m := newBenchModel()
+	m.inChat = true
+	fillToContextCap(m)
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.needAutoScroll = true
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		m.Update(agentMessageMsg{text: " more streaming text arrives"})
 	}
 }

@@ -163,6 +163,13 @@ func (m *Model) renderVirtualDocAt(height, offset int) string {
 	last, _ := messageAtLine(heights, max(0, msgWinEnd-1))
 
 	var b strings.Builder
+	// Off-window bulk is the dominant part of the document at large offsets
+	// (every row outside the styled window). Those rows are never drawn —
+	// the window rows are real by construction — so the bulk is emitted as
+	// bare empty lines: the row count (and with it bubbles' scroll clamping
+	// and the scrollbar) stays exact while SetContent avoids handing the
+	// renderer tens of thousands of styled rows to width-measure per feed.
+	// Only the visible slots keep the real gutter row.
 	emitPad := func(rows int) {
 		for r := 0; r < rows; r++ {
 			b.WriteString(padRow(vpW))
@@ -170,9 +177,8 @@ func (m *Model) renderVirtualDocAt(height, offset int) string {
 		}
 	}
 	emitPlaceholder := func(rows int) {
-		for r := 0; r < rows; r++ {
-			b.WriteString(placeholderRow(vpW))
-			b.WriteByte('\n')
+		if rows > 0 {
+			b.WriteString(strings.Repeat("\n", rows))
 		}
 	}
 
@@ -217,5 +223,7 @@ func (m *Model) renderVirtualDocAt(height, offset int) string {
 	}
 	emitPlaceholder(below)
 
-	return strings.TrimRight(b.String(), "\n")
+		// TrimSuffix, not TrimRight: the below-window bulk is bare newlines and
+	// must survive as empty lines (TrimRight would collapse the row count).
+	return strings.TrimSuffix(b.String(), "\n")
 }

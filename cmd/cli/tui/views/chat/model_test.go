@@ -2735,7 +2735,8 @@ func TestRenderCacheReusesStableBlocks(t *testing.T) {
 	if len(m.renderCache) != 2 {
 		t.Fatalf("cache entries = %d, want 2", len(m.renderCache))
 	}
-	first := m.renderCache[0].block
+	userSeq := m.messages[0].Seq
+	first := m.renderCache[userSeq].block
 	if first == "" {
 		t.Fatal("user block should be cached")
 	}
@@ -2743,10 +2744,11 @@ func TestRenderCacheReusesStableBlocks(t *testing.T) {
 	// the untouched user message keeps its cached block.
 	m.messages[1].Content = "reply one plus more"
 	m.renderMessages()
-	if m.renderCache[0].block != first {
+	if m.renderCache[userSeq].block != first {
 		t.Error("unchanged message must reuse its cached block")
 	}
-	if m.renderCache[1].block == "" || m.renderCache[1].block == m.renderCache[1].content {
+	asstSeq := m.messages[1].Seq
+	if m.renderCache[asstSeq].block == "" || m.renderCache[asstSeq].block == m.renderCache[asstSeq].content {
 		t.Error("changed message should be restyled")
 	}
 	if len(m.renderCache) != 2 {
@@ -2761,7 +2763,8 @@ func TestRenderCacheVisibilityChangeInvalidates(t *testing.T) {
 		{Role: "assistant", Content: "hi"},
 	}
 	m.renderMessages()
-	before := m.renderCache[0].block
+	thoughtSeq := m.messages[0].Seq
+	before := m.renderCache[thoughtSeq].block
 	if before == "" {
 		t.Fatal("thought block should render by default")
 	}
@@ -2770,7 +2773,7 @@ func TestRenderCacheVisibilityChangeInvalidates(t *testing.T) {
 	if !strings.Contains(utils.StripANSI(out), "secret") {
 		t.Error("expanded thought must render its content")
 	}
-	if m.renderCache[0].skip || m.renderCache[0].block == before {
+	if m.renderCache[thoughtSeq].skip || m.renderCache[thoughtSeq].block == before {
 		t.Error("thought entry should restyle when expansion flips")
 	}
 }
@@ -3082,9 +3085,11 @@ func TestVirtualDocStylesOnlyVisibleWindow(t *testing.T) {
 		t.Errorf("row %d should be the blank bottom margin:\n%q",
 			layout.TranscriptTopPad+3, lines[layout.TranscriptTopPad+3])
 	}
+	// Off-window rows are blank bulk: never drawn, they exist only to keep
+	// the doc's row count (scroll clamping, scrollbar) exact.
 	for i := layout.TranscriptTopPad + 4; i < len(lines); i++ {
-		if !strings.Contains(lines[i], "┆") {
-			t.Errorf("out-of-window row %d should be a placeholder:\n%q", i, lines[i])
+		if lines[i] != "" {
+			t.Errorf("out-of-window row %d should be blank bulk:\n%q", i, lines[i])
 		}
 	}
 }
@@ -3097,7 +3102,8 @@ func TestVirtualScrollSupplementsMissingRows(t *testing.T) {
 	m.chatViewport.SetHeight(4)
 
 	m.renderVirtualDoc(4) // height measurement styles every message once
-	first := m.renderCache[0].block
+	userSeq := m.messages[0].Seq
+	first := m.renderCache[userSeq].block
 	if first == "" {
 		t.Fatal("message 0 should be styled at the top")
 	}
@@ -3115,7 +3121,7 @@ func TestVirtualScrollSupplementsMissingRows(t *testing.T) {
 		t.Fatalf("offset = %d, want 6", m.chatViewport.YOffset())
 	}
 	m.feedViewport(4)
-	if m.renderCache[0].block != first {
+	if m.renderCache[userSeq].block != first {
 		t.Error("exited message must reuse its cached block, not restyle")
 	}
 	// The refeed at offset 6 must show real rows for the newly revealed
@@ -3136,9 +3142,12 @@ func TestVirtualDocUniformRowWidthAndTotal(t *testing.T) {
 	vpW := layout.GetTranscriptWidth(m.width)
 	m.chatViewport.SetHeight(5)
 	doc := m.renderVirtualDoc(5)
+	// Visible rows (styled blocks, gutter filler) are exactly vpW so
+	// bubbles never soft-wraps the line↔row mapping; off-window bulk rows
+	// are blank (never drawn) and must stay empty for the same reason.
 	for i, l := range strings.Split(doc, "\n") {
-		if w := utils.DisplayWidth(l); w != vpW {
-			t.Errorf("doc row %d width = %d, want %d (uniform, no soft-wrap)", i, w, vpW)
+		if w := utils.DisplayWidth(l); w != vpW && w != 0 {
+			t.Errorf("doc row %d width = %d, want %d or blank bulk (no soft-wrap)", i, w, vpW)
 		}
 	}
 	m.chatViewport.SetContent(doc)
