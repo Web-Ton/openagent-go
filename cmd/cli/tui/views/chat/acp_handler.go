@@ -111,10 +111,32 @@ func (h *acpEventHandler) OnToolCall(tc openacp.ToolCallUpdate) {
 	if b, err := json.Marshal(tc.RawInput); err == nil && string(b) != "null" {
 		msg.input = string(b)
 	}
-	if b, err := json.Marshal(tc.RawOutput); err == nil && string(b) != "null" {
+	if out := toolOutputText(tc.RawOutput); out != "" {
+		msg.output = out
+	} else if b, err := json.Marshal(tc.RawOutput); err == nil && string(b) != "null" {
 		msg.output = string(b)
 	}
 	h.program.Send(msg)
+}
+
+// toolOutputText unwraps the server's single-key output envelopes
+// ("result"/"chunk"/…) into the tool's real text, so the transcript shows
+// readable multi-line output instead of a re-marshaled JSON dump. Unknown
+// shapes return "" and fall back to the raw JSON rendering.
+func toolOutputText(raw any) string {
+	switch v := raw.(type) {
+	case string:
+		return v
+	case map[string]any:
+		if len(v) == 1 {
+			for _, k := range []string{"result", "chunk", "output", "content", "text"} {
+				if s, ok := v[k].(string); ok {
+					return s
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func (h *acpEventHandler) OnPlan(plan openacp.Plan) {

@@ -2,11 +2,13 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"image/color"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -523,14 +525,13 @@ func NewModel(ctx context.Context, cancel context.CancelFunc, workDir, ver, mode
 		tips:       components.NextHelpTip(),
 		suggestion: suggestion,
 
-		// Transcript visibility defaults: thought cards are collapsed to a
-		// one-line summary (Thinking... / Thought for Ns) until
-		// /toggle_thinking expands them; skill/shell rows and tool details
-		// are shown until toggled off (the palette icons start ●).
+		// Transcript visibility defaults: thought cards collapse to a one-line
+		// summary (Thinking... / Thought for Ns) and tool rows show the call
+		// line only — both expand via /toggle_thinking and /toggle_toolcall;
+		// skill/shell rows stay visible until toggled off.
 		visibleConfig: components.VisibleConfig{
-			ShowToolSkill:  true,
-			ShowToolShell:  true,
-			ShowToolDetail: true,
+			ShowToolSkill: true,
+			ShowToolShell: true,
 		},
 
 		// Permission policy is persisted; the safe default is ask.
@@ -2555,7 +2556,7 @@ func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
 		if isShellTool(msg.ToolName) && !m.visibleConfig.ShowToolShell {
 			return "", true
 		}
-		return indentedBlock(m.toolBody(msg)), false
+		return indentedBlock(m.toolBody(msg, vpW)), false
 	case "error":
 		return indentedBlock(theme.BaseStyle().Foreground(theme.Danger).Render(content)), false
 	default:
@@ -2724,26 +2725,77 @@ func wrapPlain(s string, maxW int) string {
 	return strings.Join(out, "\n")
 }
 
-// toolBody renders the tool row(s): a status icon + tool name (with the
-// folded input when details are on). Colors track status like opencode —
-// running bright, completed muted, failed red — and the output renders
-// muted below the status line.
-func (m *Model) toolBody(msg ChatMessage) string {
-	icon, fg := "⏳", theme.TextNormal
+// toolBody renders a tool call in the opencode style: a status glyph glued
+// to the title, then — only when the title carries no argument info — one
+// compact [k=v …] bracket folded from the raw input. The server's
+// ToolTitle already summarizes the useful argument ("read README.md",
+// "settings list"), so repeating it as key=value pairs just duplicates the
+// line; a bare-name title ("settings") keeps the bracket for context.
+// ShowToolDetail unfolds a muted, wrapped output preview under the call
+// line. The glyph is ASCII: East-Asian-ambiguous glyphs (→) render
+// double-width in CJK terminals and overstrike the name.
+func (m *Model) toolBody(msg ChatMessage, vpW int) string {
+	icon, fg := ">", theme.TextNormal
 	switch msg.ToolStatus {
 	case toolDone:
-		icon, fg = "✓", theme.TextMute
+		icon, fg = ">", theme.TextMute
 	case toolFailed:
 		icon, fg = "✗", theme.Danger
 	}
-	line := theme.BaseStyle().Foreground(fg).Render(icon + " " + msg.ToolName)
-	if m.visibleConfig.ShowToolDetail && msg.ToolInput != "" {
-		line += theme.BaseStyle().Foreground(fg).Render(" (" + foldOutput(msg.ToolInput, 1) + ")")
+	style := theme.BaseStyle().Foreground(fg)
+	line := style.Render(icon + " " + msg.ToolName)
+	// ToolTitle always answers "name …" when it extracted a field, so a
+	// single-word title means the raw args are the only description left.
+	if len(strings.Fields(msg.ToolName)) <= 1 {
+		budget := vpW - transcriptIndent - utils.DisplayWidth(icon+" "+msg.ToolName) - 1
+		if args := compactToolArgs(msg.ToolInput, budget); args != "" {
+			line += style.Render(" " + args)
+		}
 	}
 	if m.visibleConfig.ShowToolDetail && msg.ToolOutput != "" {
-		line += "\n" + theme.BaseStyle().Foreground(theme.TextMute).Render(foldOutput(msg.ToolOutput, defaultToolOutputLines))
+		lines := strings.Split(foldOutput(msg.ToolOutput, defaultToolOutputLines), "\n")
+		for i, l := range lines {
+			lines[i] = wrapPlain(l, vpW-transcriptIndent)
+		}
+		line += "\n" + theme.BaseStyle().Foreground(theme.TextMute).Render(strings.Join(lines, "\n"))
 	}
 	return line
+}
+
+// compactToolArgs folds a tool call's JSON input into one "[k=v …]" bracket
+// (opencode's "[limit=80]" look). Values are flattened to one line and
+// individually truncated; the whole bracket is clamped to maxW. Non-JSON
+// input renders as a single truncated token; empty input renders "".
+func compactToolArgs(input string, maxW int) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ""
+	}
+	var pairs []string
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(input), &obj); err == nil && obj != nil {
+		for k, v := range obj {
+			val := strings.TrimSpace(strings.ReplaceAll(fmt.Sprintf("%v", v), "\n", " "))
+			if val == "" {
+				continue
+			}
+			if utils.DisplayWidth(val) > 24 {
+				val = utils.TruncateByWidth(val, 24)
+			}
+			pairs = append(pairs, k+"="+val)
+		}
+		sort.Strings(pairs)
+	} else {
+		pairs = append(pairs, strings.ReplaceAll(input, "\n", " "))
+	}
+	s := strings.Join(pairs, " ")
+	if s == "" || maxW <= 4 {
+		return ""
+	}
+	if utils.DisplayWidth(s) > maxW-2 {
+		s = utils.TruncateByWidth(s, maxW-2)
+	}
+	return "[" + s + "]"
 }
 
 // renderMessagesRange renders messages[start:end) with the standard block
