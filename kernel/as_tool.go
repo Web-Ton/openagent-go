@@ -142,13 +142,10 @@ func (t *subAgentTool) Definition() openagent.FunctionDefinition {
 	}
 	return openagent.FunctionDefinition{
 		Name: name,
-		Description: fmt.Sprintf("Delegate a focused investigation to the %s sub-agent. %s "+
-			"Launch multiple sub-agents in one turn to cover different areas in parallel. "+
-			"It runs in the background and notifies you on completion — you will receive a system-reminder with the result, "+
-			"so do not duplicate its work while waiting. "+
-			"The result includes an agent_id you can pass to sub_agent_send to send follow-up questions to the SAME sub-agent, "+
-			"which keeps its conversation history so you don't need to re-explain context. "+
-			"Up to %d sub-agents may run concurrently; excess calls are rejected — wait for some to finish first.",
+		Description: fmt.Sprintf("Delegate to the %s sub-agent. %s "+
+			"Runs in the background; you receive a system-reminder on completion — do not duplicate its work while waiting. "+
+			"The result includes an agent_id for sub_agent_send follow-ups (same sub-agent, retained history). "+
+			"Up to %d may run concurrently; excess calls are rejected.",
 			name, desc, maxConcurrentSubAgents),
 		Parameters: openagent.SchemaOf[DelegateParams](),
 	}

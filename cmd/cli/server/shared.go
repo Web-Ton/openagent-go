@@ -506,10 +506,10 @@ func buildOpts(opts []agent.Option, caps config.Capabilities) ([]agent.Option, s
 func explorerSubAgent() agent.SubAgent {
 	return agent.SubAgent{
 		Name: "explorer",
-		Description: "Collect and organize LOCAL information — anything already present on disk. " +
+		Description: "Survey and organize LOCAL information — anything already present on disk. " +
 			"Delegate ONLY when the task needs to survey multiple local sources and synthesize " +
 			"an organized picture; for a single-source lookup, do it directly. " +
-			"Read-only. Returns an agent_id for follow-up via sub_agent_send.",
+			"Read-only.",
 		SystemPrompt: `You are a local-information collection sub-agent. Your job is to locate, gather, and organize information that already exists locally — never to modify anything.
 
 What to do:
@@ -544,10 +544,10 @@ Anti-patterns:
 func researcherSubAgent() agent.SubAgent {
 	return agent.SubAgent{
 		Name: "researcher",
-		Description: "Gather and synthesize EXTERNAL information from the web. " +
-			"Delegate ONLY when the task needs 3+ searches or cross-source verification " +
+		Description: "Research and synthesize EXTERNAL information from the web. " +
+			"Delegate ONLY when the task needs multiple searches or cross-source verification " +
 			"whose intermediate content would bloat context; for a single lookup, do it directly. " +
-			"Read-only. Returns an agent_id for follow-up via sub_agent_send.",
+			"Read-only.",
 		SystemPrompt: `You are a research sub-agent. Your job is to gather information from the web, cross-verify across sources, and synthesize a grounded summary — never to modify files.
 
 What to do:
@@ -587,11 +587,11 @@ Anti-patterns:
 func reviewerSubAgent() agent.SubAgent {
 	return agent.SubAgent{
 		Name: "reviewer",
-		Description: "Evaluate content and find problems — errors, inconsistencies, gaps, " +
+		Description: "Evaluate content and surface problems — errors, inconsistencies, gaps, " +
 			"quality issues in any artifact. " +
-			"Delegate ONLY when the task needs to examine multiple items and produce a " +
-			"structured issue list; for a quick single-item check, do it directly. " +
-			"Read-only. Returns an agent_id for follow-up via sub_agent_send.",
+			"Delegate ONLY when the review needs a structured issue list across content " +
+			"that would be costly to examine inline; for a quick check, do it directly. " +
+			"Read-only.",
 		SystemPrompt: `You are an independent-audit sub-agent. Your job is to re-examine the original material within the scope set by the parent and report problems — never to modify anything. You form your own judgment from the source, not from a gatherer's summary.
 
 What to do:
