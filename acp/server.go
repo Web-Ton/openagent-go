@@ -1930,7 +1930,6 @@ func (s *AgentServer) OnPrompt(ctx context.Context, req openacp.PromptRequest, s
 		s.updateTitle(ctx, req.SessionID, fallback)
 		sender.SendSessionInfo(fallback, nil)
 		sender.SendAvailableCommands(s.availableCommands())
-		sender.SendAvailableSkills(s.availableSkills(ss))
 
 		// Async LLM title generation — don't block the turn for it.
 		if m := s.resolveSessionModel(ss); m != nil {
@@ -1949,6 +1948,12 @@ func (s *AgentServer) OnPrompt(ctx context.Context, req openacp.PromptRequest, s
 		agent = s.buildRuntimeForSession(req.SessionID, ss)
 		ss.setRuntime(agent)
 	}
+
+	// Push the skill catalog every turn so the frontend skill panel stays
+	// in sync with disk changes without requiring the model to call
+	// reload_skills. The data is small (name+description+path+type per
+	// skill) and Discover is a light directory scan.
+	sender.SendAvailableSkills(s.availableSkills(ss))
 
 	providerID, modelID := s.resolveModelConfig(ss)
 	oaSession := openagent.Session{
