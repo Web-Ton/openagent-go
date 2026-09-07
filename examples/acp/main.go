@@ -127,10 +127,10 @@ type eventPrinter struct{}
 
 func (p *eventPrinter) reset() {}
 
-func (p *eventPrinter) OnAgentMessage(text string) {
+func (p *eventPrinter) OnAgentMessage(text string, meta map[string]any) {
 	fmt.Printf("  message: %s", text)
 }
-func (p *eventPrinter) OnAgentThought(text string) {
+func (p *eventPrinter) OnAgentThought(text string, meta map[string]any) {
 	fmt.Printf("  thought: %s\n", text)
 }
 func (p *eventPrinter) OnToolCall(tc openacp.ToolCallUpdate) {
@@ -149,4 +149,6 @@ func (p *eventPrinter) OnModeUpdate(modeID openacp.SessionModeId)               
 func (p *eventPrinter) OnConfigOptionUpdate(opts []openacp.SessionConfigOption)   {}
 func (p *eventPrinter) OnUsageUpdate(used, total int, cost *openacp.Cost)         {}
 func (p *eventPrinter) OnSessionInfo(title string, metadata map[string]any)       {}
-func (p *eventPrinter) OnUserMessage(text string)                                 {}
+func (p *eventPrinter) OnUserMessage(text string, meta map[string]any)            {}
+func (p *eventPrinter) OnContextCompacting(meta map[string]any)                   {}
+func (p *eventPrinter) OnContextCompacted(meta map[string]any)                    {}

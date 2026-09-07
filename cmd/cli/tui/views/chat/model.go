@@ -123,6 +123,13 @@ type Model struct {
 
 	needAutoScroll bool
 
+	// compacting is true while a /compact control round-trip is in flight.
+	// The agent's slash registry intercepts the text and compacts the
+	// history; the round-trip never enters the conversation store (nor the
+	// LLM), so its textual echo is suppressed — the two-state compact block
+	// in the transcript is the display.
+	compacting bool
+
 	// input cursor blink
 	blinkCount int
 	blink      bool
@@ -301,6 +308,7 @@ const (
 	actionTheme
 	actionPlugins
 	actionSplit
+	actionCompact
 )
 
 // panelCommand is a slash-command entry for the command panel.
@@ -324,6 +332,7 @@ func allPanelCommands() []panelCommand {
 		{"/models", "Switch model", actionModels, true, false},
 		{"/toggle_mode", "Switch mode", actionToggleMode, true, false},
 		{"/thought_level", "Switch thought level", actionThoughtLevel, true, false},
+		{"/compact", "Compact session context", actionCompact, true, false},
 		{"/toggle_thinking", "Expand thinking content", actionToggleThinking, true, true},
 		{"/toggle_skill", "Toggle skill tools", actionToggleSkill, true, true},
 		{"/toggle_shell", "Toggle shell tools", actionToggleShell, true, true},
@@ -368,6 +377,12 @@ type ChatMessage struct {
 	Content string
 	TurnId  int64
 
+	// Wall-clock when this message arrived (live: stamped on arrival, the
+	// last chunk of a streaming message wins; replay: parsed from the stored
+	// row's created_at over the wire). Zero on legacy replayed rows. It
+	// timestamps the end of the turn when set on a turn's last message.
+	CreatedAt time.Time
+
 	// thought timing (Role == "thought"): ThoughtStart is stamped when the
 	// first chunk arrives, ThoughtEnd when thinking gives way to another
 	// message or the turn finishes. Zero values mean the span is unknown —
@@ -381,6 +396,18 @@ type ChatMessage struct {
 	ToolStatus string // "running" | "done" | "failed"
 	ToolInput  string
 	ToolOutput string
+
+	// context-compaction block (Role == "compact"): rendered like the
+	// thought line, two states — "Compacting context..." while running,
+	// then a settled outcome line with duration (or the failure reason).
+	// Driven by the context_compacting / context_compacted session updates;
+	// compaction is never persisted, so the block only exists in the live
+	// transcript.
+	CompactStart  time.Time
+	CompactEnd    time.Time // zero while running
+	CompactedMsgs int
+	FreedTokens   int
+	CompactError  string
 }
 
 // tool status markers rendered in the transcript.
@@ -415,7 +442,7 @@ func NewModel(ctx context.Context, cancel context.CancelFunc, workDir, ver, mode
 
 	// viewport (transcript scroll area)
 	vp := viewport.New()
-	vp.SetWidth(layout.GetViewWidth(defaultWidth))
+	vp.SetWidth(layout.GetTranscriptWidth(defaultWidth))
 	vp.SetHeight(layout.GetViewHeight(defaultHeight))
 	vp.FillHeight = true
 	vp.Style = theme.BaseStyle()
@@ -541,8 +568,20 @@ type acpReadyMsg struct {
 	sessionID     string
 	configOptions []openacp.SessionConfigOption
 }
-type agentMessageMsg struct{ text string }
-type agentThoughtMsg struct{ text string }
+type agentMessageMsg struct {
+	text      string
+	createdAt time.Time // from replay _meta; zero on live streams (stamp on arrival)
+}
+type agentThoughtMsg struct {
+	text      string
+	createdAt time.Time
+}
+type contextCompactingMsg struct{ totalMessages int }
+type contextCompactedMsg struct {
+	compressed int
+	freed      int
+	errStr     string
+}
 type promptDoneMsg struct{}
 type notifyClearMsg struct{}
 type flushViewportMsg struct{}
@@ -555,7 +594,10 @@ type newSessionMsg struct {
 	mode          string
 	err           error
 }
-type userMessageMsg struct{ text string }
+type userMessageMsg struct {
+	text      string
+	createdAt time.Time // from replay _meta; zero on live streams
+}
 type planMsg struct{ entries []openacp.PlanEntry }
 type loadSessionsMsg struct {
 	items []sessionItem
@@ -582,6 +624,8 @@ type toolCallMsg struct {
 	status string
 	input  string
 	output string
+
+	createdAt time.Time // from replay _meta; zero on live streams
 }
 type permissionRequestMsg struct {
 	req     openacp.RequestPermissionRequest
@@ -748,7 +792,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.updateInputWidth() // welcome box is narrower than chat; re-fit on page switch
 					m.inputQueue = append(m.inputQueue, text)
 					m.promptCount++
-					m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId})
+					m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId, CreatedAt: time.Now()})
 					m.chatTextarea.SetValue("")
 					m.viewportDirty = true
 					if len(m.inputQueue) == 1 {
@@ -770,7 +814,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.inputQueue = append(m.inputQueue, text)
 					m.promptCount++
 					m.closeTrailingThought()
-					m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId})
+					m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId, CreatedAt: time.Now()})
 					m.chatTextarea.SetValue("")
 					m.viewportDirty = true
 					m.statusText = fmt.Sprintf("[Queued:%d] waiting for the agent...", len(m.inputQueue))
@@ -779,9 +823,10 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// User message → transcript, then async Prompt to ACP.
 				m.promptCount++
 				m.messages = append(m.messages, ChatMessage{
-					Role:    "user",
-					Content: text,
-					TurnId:  m.turnId,
+					Role:      "user",
+					Content:   text,
+					TurnId:    m.turnId,
+					CreatedAt: time.Now(),
 				})
 				m.chatTextarea.SetValue("")
 				m.viewportDirty = true
@@ -914,17 +959,24 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case agentMessageMsg:
+		if m.compacting {
+			// /compact round-trip's textual echo: suppressed — the compact
+			// block in the transcript already carries the outcome.
+			return m, nil
+		}
 		m.closeTrailingThought()
 		if n := len(m.messages); n > 0 && m.messages[n-1].Role == "assistant" && m.messages[n-1].TurnId == m.turnId {
 			m.messages[n-1].Content += msg.text
+			m.messages[n-1].CreatedAt = m.stampACPMeta(msg.createdAt)
 		} else {
-			m.messages = append(m.messages, ChatMessage{Role: "assistant", Content: msg.text, TurnId: m.turnId})
+			m.messages = append(m.messages, ChatMessage{Role: "assistant", Content: msg.text, TurnId: m.turnId, CreatedAt: m.stampACPMeta(msg.createdAt)})
 		}
 		m.trimMessageStore()
 		return m.markContentDirty()
 	case agentThoughtMsg:
 		if n := len(m.messages); n > 0 && m.messages[n-1].Role == "thought" && m.messages[n-1].TurnId == m.turnId {
 			m.messages[n-1].Content += msg.text
+			m.messages[n-1].CreatedAt = m.stampACPMeta(msg.createdAt)
 		} else {
 			start := time.Now()
 			if m.replaying {
@@ -932,7 +984,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// timestamps zero so the collapsed card stays undated.
 				start = time.Time{}
 			}
-			m.messages = append(m.messages, ChatMessage{Role: "thought", Content: msg.text, TurnId: m.turnId, ThoughtStart: start})
+			m.messages = append(m.messages, ChatMessage{Role: "thought", Content: msg.text, TurnId: m.turnId, ThoughtStart: start, CreatedAt: m.stampACPMeta(msg.createdAt)})
 		}
 		m.trimMessageStore()
 		return m.markContentDirty()
@@ -949,6 +1001,14 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case promptDoneMsg:
+		if m.compacting {
+			// /compact round-trip finished: the compact block already shows
+			// the outcome, nothing more to surface.
+			m.compacting = false
+			m.loading = false
+			m.statusText = ""
+			return m, nil
+		}
 		m.closeTrailingThought()
 		m.loading = false
 		m.statusText = ""
@@ -967,6 +1027,31 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.used > 0 {
 			m.usedTokens = msg.used
+		}
+		return m, nil
+	case contextCompactingMsg:
+		// History compaction started (auto, or manual /compact): open the
+		// two-state compact block. Idempotent — a round-trip emits the
+		// update once per pass.
+		if n := len(m.messages); n > 0 && m.messages[n-1].Role == "compact" && m.messages[n-1].CompactEnd.IsZero() {
+			return m, nil
+		}
+		m.messages = append(m.messages, ChatMessage{Role: "compact", TurnId: m.turnId, CompactStart: time.Now()})
+		m.trimMessageStore()
+		return m.markContentDirty()
+	case contextCompactedMsg:
+		// Compaction finished: close the open compact block with the
+		// outcome and stamp the end time for the duration display.
+		for i := len(m.messages) - 1; i >= 0; i-- {
+			prev := &m.messages[i]
+			if prev.Role != "compact" || !prev.CompactEnd.IsZero() {
+				continue
+			}
+			prev.CompactEnd = time.Now()
+			prev.CompactedMsgs = msg.compressed
+			prev.FreedTokens = msg.freed
+			prev.CompactError = msg.errStr
+			return m.markContentDirty()
 		}
 		return m, nil
 	case modeUpdateMsg:
@@ -1042,7 +1127,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.promptCount++
-		m.messages = append(m.messages, ChatMessage{Role: "user", Content: msg.text, TurnId: m.turnId})
+		m.messages = append(m.messages, ChatMessage{Role: "user", Content: msg.text, TurnId: m.turnId, CreatedAt: m.stampACPMeta(msg.createdAt)})
 		m.trimMessageStore()
 		m.viewportDirty = true
 		return m, nil
@@ -1126,6 +1211,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.output != "" {
 				m.messages[i].ToolOutput = msg.output
 			}
+			if !msg.createdAt.IsZero() {
+				m.messages[i].CreatedAt = msg.createdAt
+			}
 			return m.markContentDirty()
 		}
 		m.closeTrailingThought()
@@ -1137,12 +1225,20 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ToolStatus: msg.status,
 			ToolInput:  msg.input,
 			ToolOutput: msg.output,
+			CreatedAt:  m.stampACPMeta(msg.createdAt),
 		})
 		m.trimMessageStore()
 		return m.markContentDirty()
 	case acpErrorMsg:
+		if m.compacting {
+			// A failed /compact round-trip: restore idle state and surface
+			// the error through the normal error path below.
+			m.compacting = false
+			m.loading = false
+			m.statusText = ""
+		}
 		m.closeTrailingThought()
-		m.messages = append(m.messages, ChatMessage{Role: "error", Content: msg.err.Error()})
+		m.messages = append(m.messages, ChatMessage{Role: "error", Content: msg.err.Error(), CreatedAt: time.Now()})
 		m.loading = false
 		m.viewportDirty = true
 		return m, nil
@@ -1257,7 +1353,7 @@ func (m *Model) commandEnabled(pc panelCommand) bool {
 		return false
 	}
 	switch pc.action {
-	case actionSessions, actionModels, actionNew:
+	case actionSessions, actionModels, actionNew, actionCompact:
 		return m.acpSession != nil
 	}
 	return true
@@ -1370,7 +1466,7 @@ func (m *Model) sendPrompt(text string) {
 	// the event loop, so it must not read fields the loop can mutate. The
 	// session handle is set once at connect; ctx lives for the program's life.
 	sess, ctx, program := m.acpSession, m.ctx, m.program
-	if sess == nil || ctx == nil {
+	if sess == nil || ctx == nil || program == nil {
 		return
 	}
 	go func() {
@@ -1532,6 +1628,33 @@ func (m *Model) executeCommand(pc panelCommand) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusText = "Split view: off"
 		}
+		return m, nil
+	case actionCompact:
+		// Server-side control command: the agent's slash registry intercepts
+		// "/compact" at the top of OnPrompt and compacts the session history
+		// through the runtime's Compressor (kernel CompressAll). The
+		// round-trip never enters the conversation store nor reaches the
+		// LLM, so the result is surfaced as a toast, not a transcript
+		// message.
+		if m.acpSession == nil {
+			m.statusText = "Backend not connected"
+			return m, nil
+		}
+		if m.activeSessionID == "" {
+			m.statusText = "No active session to compact"
+			return m, nil
+		}
+		if m.loading {
+			m.statusText = "Wait for the current turn to finish"
+			return m, nil
+		}
+		if m.compacting {
+			return m, nil
+		}
+		m.compacting = true
+		m.loading = true
+		m.statusText = "Compacting context..."
+		m.sendPrompt("/compact")
 		return m, nil
 	default:
 		// actionSessions/actionModels/actionUpdateSkills land here until the
@@ -2087,7 +2210,7 @@ func (m *Model) historyDown() {
 func (m *Model) updateWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.width = msg.Width
 	m.height = msg.Height
-	m.chatViewport.SetWidth(layout.GetViewWidth(m.width))
+	m.chatViewport.SetWidth(layout.GetTranscriptWidth(m.width))
 	m.chatViewport.SetHeight(layout.GetViewHeight(m.height))
 	m.updateInputWidth()
 	m.viewportDirty = true
@@ -2131,9 +2254,12 @@ func (m *Model) renderMessages() string {
 // fingerprint it was styled under, so unchanged messages skip re-styling.
 type renderCacheEntry struct {
 	vpW                                                  int
-	loading                                              bool
+	loading, replaying, turnEnd                          bool
 	expandThink, showSkill, showShell, showDetail        bool
-	thoughtStart, thoughtEnd                             time.Time
+	thoughtStart, thoughtEnd, createdAt                  time.Time
+	compactStart, compactEnd                             time.Time
+	compactedMsgs, freedTokens                           int
+	compactError                                         string
 	role, content, toolName, toolStatus, toolIn, toolOut string
 	block                                                string
 	skip                                                 bool
@@ -2142,16 +2268,26 @@ type renderCacheEntry struct {
 // renderCacheHits reports whether a cached entry was styled under exactly
 // the current message and viewport settings. The thought timestamps are part
 // of the fingerprint: closing a trailing thought (end stamp) must restyle
-// its collapsed summary even though the content is unchanged.
-func renderCacheHits(e renderCacheEntry, msg ChatMessage, vpW int, loading bool, vc components.VisibleConfig) bool {
+// its collapsed summary even though the content is unchanged. turnEnd and
+// replaying are in it too: a block gains (or loses) its turn-end marker row
+// when the next message arrives, the turn completes, or a replay finishes.
+func renderCacheHits(e renderCacheEntry, msg ChatMessage, vpW int, loading, replaying, turnEnd bool, vc components.VisibleConfig) bool {
 	return e.vpW == vpW &&
 		e.loading == loading &&
+		e.replaying == replaying &&
+		e.turnEnd == turnEnd &&
 		e.expandThink == vc.ExpandThinking &&
 		e.showSkill == vc.ShowToolSkill &&
 		e.showShell == vc.ShowToolShell &&
 		e.showDetail == vc.ShowToolDetail &&
 		e.thoughtStart.Equal(msg.ThoughtStart) &&
 		e.thoughtEnd.Equal(msg.ThoughtEnd) &&
+		e.createdAt.Equal(msg.CreatedAt) &&
+		e.compactStart.Equal(msg.CompactStart) &&
+		e.compactEnd.Equal(msg.CompactEnd) &&
+		e.compactedMsgs == msg.CompactedMsgs &&
+		e.freedTokens == msg.FreedTokens &&
+		e.compactError == msg.CompactError &&
 		e.role == msg.Role &&
 		e.content == msg.Content &&
 		e.toolName == msg.ToolName &&
@@ -2162,30 +2298,126 @@ func renderCacheHits(e renderCacheEntry, msg ChatMessage, vpW int, loading bool,
 
 // renderMessageBlock returns the styled block for message i (skip=true when
 // the message is gated out by visibility toggles). Untouched messages reuse
-// their cached block instead of re-running glamour/lipgloss styling.
+// their cached block instead of re-running glamour/lipgloss styling. A
+// message that ends its turn carries the opencode-style info row (model ·
+// duration) under the block, separated by a blank row on each side.
 func (m *Model) renderMessageBlock(i int, msg ChatMessage, vpW int) (block string, skip bool) {
 	if m.renderCache == nil {
 		m.renderCache = make(map[int]renderCacheEntry)
 	}
+	turnEnd := m.isTurnEndAt(i, msg)
 	if e, ok := m.renderCache[i]; ok &&
-		renderCacheHits(e, msg, vpW, m.loading, m.visibleConfig) {
+		renderCacheHits(e, msg, vpW, m.loading, m.replaying, turnEnd, m.visibleConfig) {
 		return e.block, e.skip
 	}
 	e := renderCacheEntry{
-		vpW: vpW, loading: m.loading,
-		expandThink:  m.visibleConfig.ExpandThinking,
-		showSkill:    m.visibleConfig.ShowToolSkill,
-		showShell:    m.visibleConfig.ShowToolShell,
-		showDetail:   m.visibleConfig.ShowToolDetail,
-		thoughtStart: msg.ThoughtStart,
-		thoughtEnd:   msg.ThoughtEnd,
-		role:         msg.Role, content: msg.Content,
+		vpW: vpW, loading: m.loading, replaying: m.replaying, turnEnd: turnEnd,
+		expandThink:   m.visibleConfig.ExpandThinking,
+		showSkill:     m.visibleConfig.ShowToolSkill,
+		showShell:     m.visibleConfig.ShowToolShell,
+		showDetail:    m.visibleConfig.ShowToolDetail,
+		thoughtStart:  msg.ThoughtStart,
+		thoughtEnd:    msg.ThoughtEnd,
+		createdAt:     msg.CreatedAt,
+		compactStart:  msg.CompactStart,
+		compactEnd:    msg.CompactEnd,
+		compactedMsgs: msg.CompactedMsgs,
+		freedTokens:   msg.FreedTokens,
+		compactError:  msg.CompactError,
+		role:          msg.Role, content: msg.Content,
 		toolName: msg.ToolName, toolStatus: msg.ToolStatus,
 		toolIn: msg.ToolInput, toolOut: msg.ToolOutput,
 	}
 	e.block, e.skip = m.styleMessageBlock(msg, vpW)
+	if turnEnd && !e.skip && e.block != "" {
+		// Turn-end marker: the opencode-style info row (model · duration),
+		// kept one blank row away from the block above and the next block
+		// below. The trailing newline adds the closing blank row (the join
+		// between blocks contributes the boundary).
+		e.block = e.block + "\n" + m.turnEndMarkerRow(i, msg, vpW) + "\n"
+	}
 	m.renderCache[i] = e
 	return e.block, e.skip
+}
+
+// isTurnEndAt reports whether message i closes its turn and should carry
+// the timestamp row: either the next message is the following turn's user
+// prompt, or it is the transcript's last message once the turn has settled
+// (not mid-prompt, not mid-replay — those get their marker when the
+// boundary message arrives). Legacy replayed rows without a wall-clock
+// never show one.
+func (m *Model) isTurnEndAt(i int, msg ChatMessage) bool {
+	if msg.CreatedAt.IsZero() {
+		return false
+	}
+	if i+1 < len(m.messages) {
+		return m.messages[i+1].Role == "user"
+	}
+	return !m.loading && !m.replaying
+}
+
+// turnEndMarkerRow renders the opencode-style end-of-turn line: a square
+// icon, the active model and the turn duration — icon in the primary color,
+// the rest muted, left-aligned at the transcript indent. Empty segments are
+// skipped along with their separator.
+func (m *Model) turnEndMarkerRow(i int, msg ChatMessage, vpW int) string {
+	muted := theme.BaseStyle().Foreground(theme.TextMute)
+	sep := muted.Render(" · ")
+	parts := theme.BaseStyle().Foreground(theme.Primary).Render("□ ")
+	first := true
+	if model := utils.TruncateByWidth(m.currentModel(), 32); model != "" {
+		parts += sep + muted.Render(model)
+		first = false
+	}
+	if d := m.turnDuration(i, msg); d > 0 {
+		if !first {
+			parts += sep
+		}
+		parts += muted.Render(formatThoughtDuration(d))
+	}
+	return theme.BaseStyle().Render(strings.Repeat(" ", transcriptIndent)) +
+		utils.TruncateStyled(parts, max(1, vpW-transcriptIndent))
+}
+
+// turnDuration returns the wall-clock span of the turn that message i
+// closes: from the turn's opening user prompt to this message. 0 when
+// either side has no timestamp (legacy rows).
+func (m *Model) turnDuration(i int, msg ChatMessage) time.Duration {
+	if msg.CreatedAt.IsZero() {
+		return 0
+	}
+	for j := i - 1; j >= 0; j-- {
+		if m.messages[j].Role != "user" {
+			continue
+		}
+		if m.messages[j].CreatedAt.IsZero() {
+			return 0
+		}
+		if d := msg.CreatedAt.Sub(m.messages[j].CreatedAt); d > 0 {
+			return d
+		}
+		return 0
+	}
+	return 0
+}
+
+// modeBadge returns the session mode label and its badge color (Auto
+// primary, Manual green, Plan notify). An unknown non-empty mode falls back
+// to the raw value in normal text, an empty mode to "" (no badge).
+func (m *Model) modeBadge() (string, color.Color) {
+	switch m.mode {
+	case "auto":
+		return "Auto", theme.Primary
+	case "manual":
+		return "Manual", theme.Success
+	case "plan":
+		return "Plan", theme.Notify
+	default:
+		if m.mode == "" {
+			return "", nil
+		}
+		return m.mode, theme.TextNormal
+	}
 }
 
 // messageRoleBorder returns the transcript rail color for a role. The rail
@@ -2253,6 +2485,20 @@ func formatThoughtDuration(d time.Duration) string {
 	}
 }
 
+// stampACPMeta resolves a streaming ACP message's wall-clock: replay events
+// carry the stored row's created_at; legacy replayed rows carry none and
+// stay zero (no fabricated times); live events are stamped on arrival (a
+// streaming message's last chunk wins, the closest thing to its end time).
+func (m *Model) stampACPMeta(from time.Time) time.Time {
+	if !from.IsZero() {
+		return from
+	}
+	if m.replaying {
+		return time.Time{}
+	}
+	return time.Now()
+}
+
 // closeTrailingThought stamps the end time on a still-open trailing thought
 // message: thinking is over once any other message follows or the turn
 // finishes. Replayed thoughts (zero start) stay untouched — their duration
@@ -2281,7 +2527,9 @@ func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
 		body := renderMarkdownText(content, vpW-transcriptIndent)
 		return indentedBlock(body), false
 	case "thought":
-		return m.thoughtBlock(msg, content)
+		return m.thoughtBlock(msg, content, vpW)
+	case "compact":
+		return m.compactBlock(msg, vpW), false
 	case "tool":
 		// Skill/shell rows are gated by their toggles; the detail toggle
 		// hides input/output (the status line stays).
@@ -2299,29 +2547,165 @@ func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
 	}
 }
 
-// thoughtBlock renders the thought as opencode does — a warning-colored
-// one-liner, cardless: "Thinking..." while the round-trip streams,
-// "Thought: <duration>" once done, a bare "Thought" when the span is
-// unknown (replayed history). /toggle_thinking expands it to the full
-// content in muted text under the same header.
-func (m *Model) thoughtBlock(msg ChatMessage, content string) (string, bool) {
+// thoughtBlock renders the thought as opencode does — a cardless,
+// warning-colored line with an opencode-style toggle marker: "+" marks a
+// collapsed block (the body is folded into the one-line preview), "-" an
+// expanded one. The open thought auto-expands to the full muted content
+// under the "Thinking..." header while the round-trip streams and collapses
+// again once the turn closes; /toggle_thinking expands every thought.
+func (m *Model) thoughtBlock(msg ChatMessage, content string, vpW int) (string, bool) {
+	streaming := msg.ThoughtEnd.IsZero() && m.loading
+	expanded := m.visibleConfig.ExpandThinking || streaming
+	mark := "+"
+	if expanded {
+		mark = "-"
+	}
 	var header string
 	switch {
-	case msg.ThoughtEnd.IsZero() && m.loading:
-		header = theme.BaseStyle().Foreground(theme.Warning).Render("Thinking...")
+	case streaming:
+		header = theme.BaseStyle().Foreground(theme.Warning).Render(mark + " Thinking...")
 	case !msg.ThoughtStart.IsZero() && !msg.ThoughtEnd.IsZero():
 		header = theme.BaseStyle().Foreground(theme.Warning).
-			Render("Thought: " + formatThoughtDuration(msg.ThoughtEnd.Sub(msg.ThoughtStart)))
+			Render(mark + " Thought: " + formatThoughtDuration(msg.ThoughtEnd.Sub(msg.ThoughtStart)))
 	case content != "":
-		header = theme.BaseStyle().Foreground(theme.Warning).Render("Thought")
+		header = theme.BaseStyle().Foreground(theme.Warning).Render(mark + " Thought")
 	default:
 		return "", true
 	}
-	if m.visibleConfig.ExpandThinking && content != "" {
-		body := theme.BaseStyle().Foreground(theme.TextMute).Render(content)
+	if content == "" {
+		return indentedBlock(header), false
+	}
+	if expanded {
+		// Collapse the model's blank lines (reasoning streams in \n\n
+		// paragraphs — rendered verbatim it reads as double spacing) and
+		// hard-wrap to the viewport so long lines never truncate at the
+		// right edge (rows are width-normalized downstream and cut, not
+		// wrapped).
+		body := theme.BaseStyle().Foreground(theme.TextMute).
+			Render(wrapPlain(collapseBlankLines(content), vpW-transcriptIndent))
 		return indentedBlock(header + "\n" + body), false
 	}
+	// Collapsed: one row — header, then a first-line preview truncated to
+	// the viewport so the row never soft-wraps (fitRow would cut it ragged
+	// mid-glyph otherwise).
+	sep := theme.BaseStyle().Foreground(theme.TextMute).Render(" · ")
+	preview := thoughtPreview(content)
+	if budget := vpW - transcriptIndent - utils.DisplayWidth(header) - utils.DisplayWidth(sep); budget > 0 && preview != "" {
+		dimmed := theme.BaseStyle().Foreground(theme.TextMute).
+			Render(utils.TruncateByWidth(preview, budget))
+		return indentedBlock(header + sep + dimmed), false
+	}
 	return indentedBlock(header), false
+}
+
+// thoughtPreview returns the first non-empty line of a thought's content
+// for the collapsed one-liner, with "…" appended when further non-empty
+// lines follow (a blank-line-only tail stays unmarked).
+func thoughtPreview(content string) string {
+	var first string
+	more := false
+	for _, ln := range strings.Split(content, "\n") {
+		t := strings.TrimSpace(ln)
+		if t == "" {
+			continue
+		}
+		if first == "" {
+			first = t
+			continue
+		}
+		more = true
+		break
+	}
+	if first == "" {
+		return ""
+	}
+	if more {
+		return first + "…"
+	}
+	return first
+}
+
+// compactBlock renders the two-state compaction marker as a full-width
+// divider in the opencode style: a centered label riding a rule across the
+// transcript. The running pass labels in warning, the settled outcome is
+// muted with the counts/tokens/duration stats, and a failure keeps the rule
+// but renders the error in red. The label stays glyph-free: decorative
+// symbols are East-Asian-ambiguous width and overstrike the label in CJK
+// terminals.
+func (m *Model) compactBlock(msg ChatMessage, vpW int) string {
+	label, fg := "Context compacted", theme.TextMute
+	switch {
+	case msg.CompactEnd.IsZero():
+		label, fg = "Compacting context...", theme.Warning
+	case msg.CompactError != "":
+		label, fg = "✗ Compaction failed: "+msg.CompactError, theme.Danger
+	default:
+		label = fmt.Sprintf("Context compacted · %d messages · freed ~%d tokens · %s",
+			msg.CompactedMsgs, msg.FreedTokens,
+			formatThoughtDuration(msg.CompactEnd.Sub(msg.CompactStart)))
+	}
+	return centerRule(label, vpW, fg)
+}
+
+// centerRule renders label centered on a horizontal rule spanning w: "─"
+// fills both sides with a one-space pad around the label, everything in fg.
+// The label is truncated first so at least a dash fits on each side.
+func centerRule(label string, w int, fg color.Color) string {
+	label = utils.TruncateByWidth(label, max(1, w-4))
+	style := theme.BaseStyle().Foreground(fg)
+	rest := w - utils.DisplayWidth(label) - 2
+	if rest < 2 {
+		return style.Render(label)
+	}
+	left := rest / 2
+	return style.Render(strings.Repeat("─", left) + " " + label + " " + strings.Repeat("─", rest-left))
+}
+
+// collapseBlankLines drops blank lines from a streamed reasoning body:
+// models emit \n\n-style paragraph breaks, which rendered verbatim read as
+// double spacing.
+func collapseBlankLines(s string) string {
+	var out []string
+	for _, ln := range strings.Split(s, "\n") {
+		if strings.TrimSpace(ln) != "" {
+			out = append(out, ln)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// wrapPlain hard-wraps plain text to maxW display columns (CJK aware),
+// preferring space break points; a run longer than maxW is cut at the
+// column. Used for the streamed thought body, which renders as raw text
+// without markdown wrapping.
+func wrapPlain(s string, maxW int) string {
+	if maxW <= 0 {
+		return s
+	}
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		for utils.DisplayWidth(line) > maxW {
+			w, cut, lastSpace := 0, len(line), -1
+			for i, r := range line {
+				if w+utils.DisplayWidth(string(r)) > maxW {
+					cut = i
+					break
+				}
+				w += utils.DisplayWidth(string(r))
+				if r == ' ' {
+					lastSpace = i
+				}
+			}
+			seg, next := line[:cut], line[cut:]
+			if lastSpace > 0 {
+				seg, next = line[:lastSpace], line[lastSpace+1:]
+			}
+			out = append(out, strings.TrimRight(seg, " "))
+			line = next
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }
 
 // toolBody renders the tool row(s): a status icon + tool name (with the
@@ -2368,7 +2752,7 @@ func (m *Model) renderMessagesRange(start, end int) string {
 	if end < start {
 		end = start
 	}
-	vpW := layout.GetViewWidth(m.width)
+	vpW := layout.GetTranscriptWidth(m.width)
 	var doc strings.Builder
 	// The style cache can never legitimately hold more entries than there
 	// are messages (indices), so capping it against the message count bounds

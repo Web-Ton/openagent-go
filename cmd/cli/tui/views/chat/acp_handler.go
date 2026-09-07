@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -37,20 +38,70 @@ type acpEventHandler struct {
 
 // ── EventHandler ──
 
-func (h *acpEventHandler) OnAgentMessage(text string) {
-	h.program.Send(agentMessageMsg{text: text})
+// acpMetaTime extracts the stored message wall-clock from a sessionUpdate's
+// _meta (loadSession replay stamps "created_at" per message; live events
+// carry no meta). Zero time when absent or unparsable.
+func acpMetaTime(meta map[string]any) time.Time {
+	if meta == nil {
+		return time.Time{}
+	}
+	s, ok := meta["created_at"].(string)
+	if !ok || s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
-func (h *acpEventHandler) OnAgentThought(text string) {
-	h.program.Send(agentThoughtMsg{text: text})
+func (h *acpEventHandler) OnAgentMessage(text string, meta map[string]any) {
+	h.program.Send(agentMessageMsg{text: text, createdAt: acpMetaTime(meta)})
 }
 
-func (h *acpEventHandler) OnUserMessage(text string) {
-	h.program.Send(userMessageMsg{text: text})
+func (h *acpEventHandler) OnAgentThought(text string, meta map[string]any) {
+	h.program.Send(agentThoughtMsg{text: text, createdAt: acpMetaTime(meta)})
+}
+
+func (h *acpEventHandler) OnUserMessage(text string, meta map[string]any) {
+	h.program.Send(userMessageMsg{text: text, createdAt: acpMetaTime(meta)})
+}
+
+// acpMetaInt reads an integer field from a sessionUpdate's _meta (JSON
+// numbers unmarshal as float64).
+func acpMetaInt(meta map[string]any, key string) int {
+	if meta == nil {
+		return 0
+	}
+	if f, ok := meta[key].(float64); ok {
+		return int(f)
+	}
+	return 0
+}
+
+func acpMetaStr(meta map[string]any, key string) string {
+	if meta == nil {
+		return ""
+	}
+	s, _ := meta[key].(string)
+	return s
+}
+
+func (h *acpEventHandler) OnContextCompacting(meta map[string]any) {
+	h.program.Send(contextCompactingMsg{totalMessages: acpMetaInt(meta, "total_messages")})
+}
+
+func (h *acpEventHandler) OnContextCompacted(meta map[string]any) {
+	h.program.Send(contextCompactedMsg{
+		compressed: acpMetaInt(meta, "compressed_messages"),
+		freed:      acpMetaInt(meta, "freed_tokens"),
+		errStr:     acpMetaStr(meta, "error"),
+	})
 }
 
 func (h *acpEventHandler) OnToolCall(tc openacp.ToolCallUpdate) {
-	msg := toolCallMsg{id: tc.ToolCallID, title: tc.Title, status: toolRunning}
+	msg := toolCallMsg{id: tc.ToolCallID, title: tc.Title, status: toolRunning, createdAt: acpMetaTime(tc.Meta)}
 	switch tc.Status {
 	case "completed":
 		msg.status = toolDone
