@@ -3,6 +3,7 @@ package chat
 import (
 	"fmt"
 	"image/color"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -376,36 +377,37 @@ func (m *Model) renderPlanList(background lipgloss.Style, width int) string {
 	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
-// formatTokens renders a token count compactly for the sidebar: 834,
-// 12.3k, 1.2M (a trailing .0 is trimmed).
+// formatTokens renders a token count with thousands separators for the
+// sidebar: 834, 16,110, 1,234,567.
 func formatTokens(n int) string {
-	compact := func(v float64, suffix string) string {
-		s := strconv.FormatFloat(v, 'f', 1, 64)
-		return strings.TrimSuffix(s, ".0") + suffix
+	s := strconv.Itoa(n)
+	if len(s) <= 3 {
+		return s
 	}
-	switch {
-	case n >= 1_000_000:
-		return compact(float64(n)/1_000_000, "M")
-	case n >= 1_000:
-		return compact(float64(n)/1_000, "k")
-	default:
-		return strconv.Itoa(n)
+	b := make([]byte, 0, len(s)+len(s)/3)
+	for i := 0; i < len(s); i++ {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b = append(b, ',')
+		}
+		b = append(b, s[i])
 	}
+	return string(b)
 }
 
-// contextValue renders the sidebar's context line: "used / window tokens"
-// once usage has been reported, the window alone before the first update.
+// contextValue renders the sidebar's used-token line: "16,110 tokens".
 func (m *Model) contextValue() string {
-	switch {
-	case m.usedTokens > 0 && m.contextSize > 0:
-		return fmt.Sprintf("%s / %s tokens", formatTokens(m.usedTokens), formatTokens(m.contextSize))
-	case m.contextSize > 0:
-		return formatTokens(m.contextSize) + " tokens"
-	case m.usedTokens > 0:
-		return formatTokens(m.usedTokens) + " tokens"
-	default:
-		return "0 tokens"
+	return formatTokens(m.usedTokens) + " tokens"
+}
+
+// contextPercent renders the sidebar's "2% used" line — the used share of
+// the context window, rounded; empty until the model reports the window
+// size.
+func (m *Model) contextPercent() string {
+	if m.contextSize <= 0 {
+		return ""
 	}
+	pct := int(math.Round(float64(m.usedTokens) / float64(m.contextSize) * 100))
+	return fmt.Sprintf("%d%% used", pct)
 }
 
 func (m *Model) renderRight() string {
@@ -420,17 +422,25 @@ func (m *Model) renderRight() string {
 	sessionValue := background.Width(width - 1).Foreground(theme.TextAsh).Render(m.activeSessionID)
 
 	contextTitle := background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("Context")
-	contextText := background.Width(width - 1).Foreground(theme.TextAsh).Render(m.contextValue())
+	contextLines := []string{
+		contextTitle,
+		background.Width(width - 1).Foreground(theme.TextAsh).Render(m.contextValue()),
+	}
+	// The "2% used" share line only exists once the window size is known.
+	if pct := m.contextPercent(); pct != "" {
+		contextLines = append(contextLines,
+			background.Width(width-1).Foreground(theme.TextAsh).Render(pct))
+	}
 	turnsTitle := background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("Turns")
 	turnsValue := background.Width(width - 1).Foreground(theme.TextAsh).Render(strconv.Itoa(m.promptCount))
 
 	todoContent := m.renderPlanList(background, width-1)
-	header := lipgloss.JoinVertical(lipgloss.Left,
+	headerParts := []string{
 		sessionTitle, sessionValue, "",
-		contextTitle, contextText, "",
-		turnsTitle, turnsValue, "",
-		todoContent,
-	)
+	}
+	headerParts = append(headerParts, contextLines...)
+	headerParts = append(headerParts, "", turnsTitle, turnsValue, "", todoContent)
+	header := lipgloss.JoinVertical(lipgloss.Left, headerParts...)
 
 	workDirTitle := background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("WorkDir")
 	workDirValue := background.Width(width - 1).Foreground(theme.TextAsh).Render(m.workDir)
