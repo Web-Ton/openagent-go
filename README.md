@@ -32,11 +32,13 @@
 - **Static context profiles** — `AGENTS.md` (working rules) and `SOUL.md` (persona & limits) with user-level and project-level resolution
 - **Slash commands** — built-in `/help`, `/mode`, `/model`, `/compact`, `/context`, `/cwd`, `/clear`, `/rename`, `/sessions`, extensible via `slash/` registry
 - **Full CLI** — `openagent` with cobra commands, config-driven models, keyring secrets, WASM plugin runtime
-- **IM channels** — Feishu/Lark (WebSocket, card-based streaming output with markdown and tool call cards, one-click QR setup, inline approval buttons, /clear and /mode commands), personal WeChat (Tencent ilinkai channel, QR login with pairing code, /clear command), and WeCom 企业微信 (official long connection, native streaming replies, QR robot auto-creation, /clear command)
+- **IM channels** — Feishu/Lark (WebSocket, card-based streaming output with markdown and tool call cards, one-click QR setup, inline approval buttons, /clear and /mode commands), personal WeChat (Tencent ilinkai channel, QR login with pairing code, /clear command), and WeCom (official long connection, native streaming replies, QR robot auto-creation, /clear command)
 - **RunHooks with state** — start/end callbacks share opaque state; OTEL spans nest, slog logs duration
 - **Dynamic context** — session-level plan status and mode injected into every prompt turn
 
 ## Quick Start
+
+**Prerequisites:** Go 1.26.4+ and an OpenAI-compatible API key.
 
 ```bash
 # Build CLI
@@ -80,7 +82,7 @@ Create `~/.openagent/settings.json` (the `openagent` leaf is `version.Name`, def
       "api_key": "sk-...",
       "models": ["gpt-4o"]
     }
-  },
+  }
 }
 ```
 
@@ -148,11 +150,10 @@ The `--channel` flag is always required to start the bot — settings.json alone
 
 **Where credentials are stored:**
 
-| Priority | Source | When to use |
-|----------|--------|-------------|
-| 1 | `settings.json` → `channels.feishu` | You have the app ID and secret |
-| 2 | settings.json `channels.feishu` | Auto-saved after QR registration (settings is the single credential source) |
-| 3 | QR code registration | First time, no credentials at all |
+| State | Source | When |
+|-------|--------|------|
+| Credentials present | `settings.json` → `channels.feishu` | You have the app ID and secret (manual config or auto-saved from prior QR registration) |
+| No credentials | QR code registration | First time, no credentials at all |
 
 **Combine with other modes:**
 
@@ -166,7 +167,7 @@ The `--channel` flag is always required to start the bot — settings.json alone
 
 **Frontend control panel:**
 
-The Feishu connection is a **process-level daemon** — the frontend only triggers and observes; closing or refreshing the page never affects it. Serve exposes two endpoints:
+The Feishu connection is a **process-level daemon** — the frontend only triggers and observes; closing or refreshing the page never affects it. Serve exposes two endpoint groups (channel control + settings management):
 
 | Endpoint | Purpose |
 |----------|---------|
@@ -182,7 +183,7 @@ Configuration is separate from the connection: `PUT /api/settings/channels/feish
 
 **Single instance per config dir:** one Feishu app = one active WebSocket. The server holds a machine-level lock (`<config-dir>/channel/feishu/feishu.lock`) for the whole connection lifetime — a second `--channel feishu` instance fails fast instead of silently stealing events. The lock is released automatically by the kernel if the process dies. For production, run under systemd/Docker so the process (and its connection) is supervised.
 
-**Adding MCP tools (optional):**
+**Adding MCP tools (optional, applies to all modes):**
 
 ```json
 {
@@ -221,7 +222,7 @@ Feishu additionally supports `/mode` — switches between Manual and Auto execut
 
 | Mode | Behaviour |
 |------|-----------|
-| **Manual** (default) | Each non-readonly tool call shows an approval card with 同意/拒绝 buttons before executing |
+| **Manual** (default) | Each non-readonly tool call shows an approval card with Approve/Reject buttons before executing |
 | **Auto** | Tools execute immediately without human approval (higher risk) |
 
 `/mode` with no argument shows a mode-switch card with clickable buttons. `/mode auto` or `/mode manual` switches directly. The mode is per-chat (each group/private chat remembers its own setting).
@@ -232,11 +233,11 @@ The initial mode for new chats defaults to Manual; set `"default_mode": "auto"` 
 
 Each agent run renders as a single card that updates in place (debounced patches). The body interleaves segments in arrival order: thinking (collapsed panel) → text → tool call (collapsed panel, titled with tool name + status ✓/✗) → text → … When a run completes, the card switches to an expanded state. Long runs that exceed the 28KB card limit auto-rotate: the old card folds to a collapsed "done" state and a fresh card starts with the last few blocks.
 
-Approval requests in Manual mode embed their buttons directly in the run card (no separate approval card). When the user clicks 同意/拒绝, the card updates in-place and the agent continues or stops.
+Approval requests in Manual mode embed their buttons directly in the run card (no separate approval card). When the user clicks Approve/Reject, the card updates in-place and the agent continues or stops.
 
 ### WeChat (personal) Integration
 
-Connect your agent to your **personal WeChat** via Tencent's official ilinkai channel (`ilinkai.weixin.qq.com`) — no SDK, plain HTTP long-poll. The agent replies once per message (WeChat has no streaming/message-edit API; a "对方正在输入" typing indicator shows while the agent works). Media markers (`[file: /path]` in reply text) are uploaded and sent as file/image messages.
+Connect your agent to your **personal WeChat** via Tencent's official ilinkai channel (`ilinkai.weixin.qq.com`) — no SDK, plain HTTP long-poll. The agent replies once per message (WeChat has no streaming/message-edit API; a "typing…" typing indicator shows while the agent works). Media markers (`[file: /path]` in reply text) are uploaded and sent as file/image messages.
 
 **First-time setup (scan to create the bot):**
 
@@ -259,7 +260,7 @@ A QR code appears in the terminal — scan it with WeChat and confirm. The bot i
 
 A session that expires server-side (`errcode -14`) clears the credentials automatically — the next connect re-runs the QR login.
 
-### WeCom (企业微信) Integration
+### WeCom Integration
 
 Connect your agent to a **WeCom smart robot** via the official long-connection API (`wss://openws.work.weixin.qq.com`) — the richest of the three channels: **native streaming replies** (one message that grows in place), group chats with @-mentions, and voice already transcribed to text.
 
@@ -269,7 +270,7 @@ Connect your agent to a **WeCom smart robot** via the official long-connection A
 ./openagent serve --channel wecom
 ```
 
-A QR code appears — scan it with the WeCom app; the robot is created automatically and the BotID/Secret are saved to settings.json. Alternatively, create the robot manually in the WeCom admin console (安全与管理 → 管理工具 → 智能机器人 → API 模式 → 长连接) and configure it via the settings endpoint:
+A QR code appears — scan it with the WeCom app; the robot is created automatically and the BotID/Secret are saved to settings.json. Alternatively, create the robot manually in the WeCom admin console (Security & Management → Management Tools → Smart Robot → API Mode → Long Connection; 安全与管理 → 管理工具 → 智能机器人 → API 模式 → 长连接) and configure it via the settings endpoint:
 
 ```json
 {
@@ -339,6 +340,9 @@ To keep a specific domain on local storage while using OpenViking for the rest:
 │  └─ eventbus    (audit events)               │
 └──────────────────────────────────────────────┘
 ```
+
+> **Pipeline stages (8 nodes):** memory → prompt → guard → model → guard → policy → tools → store.
+> The 6 boxes above are the kernel sub-components that implement these stages.
 
 The `agent.Agent` is pure configuration (model, prompts, guards, sub-agents);
 everything executable lives in the runtime and its dependencies — tools,
@@ -539,15 +543,15 @@ Full examples: `examples/plugin/`. Rust SDK: `plugin/pdk/rust/`.
 | `examples/observer/` | Pipeline observer |
 | `examples/delegate/` | Agent as tool delegation |
 | `examples/sandbox/` | Native sandbox tools |
-| `examples/plugin/` | WASM tool, observer, and scheduled-job plugins |
+| `examples/plugin/` | WASM tool, observer, scheduled-job, and model-switch plugins |
 | `examples/skill/` | On-demand skill loading |
 | `examples/acp/` | ACP agent protocol (server + client) |
 | `examples/artifact/` | Result policy — large tool results spill to disk |
 | `examples/browser-agent/` | Browser agent via Playwright MCP |
 | `examples/mcp-client/` | MCP client demo (IaC pipeline) |
-| `examples/frontend/` | Vue.js frontend control panel (channel status, settings, QR rendering) |
+| `site/` | Next.js + React frontend control panel (channel status, settings, QR rendering) |
 | `cmd/cli/` | Full-featured CLI with WASM plugin runtime |
-| `cmd/tui/` | TUI chat client (bubbletea v2, streaming, human-in-the-loop approval) |
+| `cmd/cli/tui/` | TUI chat client (bubbletea v2, streaming, human-in-the-loop approval) |
 
 ## Packages
 
@@ -589,8 +593,8 @@ Full examples: `examples/plugin/`. Rust SDK: `plugin/pdk/rust/`.
 | `hooks/otel/` | OpenTelemetry hooks |
 | `hooks/slog/` | Structured logging hooks |
 | `hooks/redact/` | Masks sensitive env-var values in tool results |
-| `tool/` | Built-in tools (shell, read, write, ls, grep, edit, websearch, webfetch, ACP fs, ACP terminal) |
-| `channel/` | IM platform adapters — Feishu (WebSocket, card rendering), WeChat (ilinkai HTTP), WeCom (长连接 streaming) |
+| `tool/` | Built-in tools (shell, read, write, edit, ls, grep, websearch, webfetch, browser, office, ACP fs, ACP terminal) |
+| `channel/` | IM platform adapters — Feishu (WebSocket, card rendering), WeChat (ilinkai HTTP), WeCom (long-connection streaming) |
 | `keyring/` | System keychain wrapper (Linux Secret Service/kernel keyring, macOS Keychain, Windows Credential Manager) |
 | `process/` | Background shell-process lifecycle management (track, persist output, kill across turns) |
 | `scheduler/` | Cron-based job scheduling for WASM plugin scheduled tasks |
@@ -598,5 +602,8 @@ Full examples: `examples/plugin/`. Rust SDK: `plugin/pdk/rust/`.
 | `iac/` | Terraform wrapper — binary install/mirror management, init/plan/apply/destroy |
 | `version/` | Build-time binary identity (name + version via ldflags) |
 | `cmd/cli/` | CLI runtime, WASM host, REST/ACP server, settings, channel managers |
-| `cmd/tui/` | TUI chat client (bubbletea v2) |
+| `cmd/cli/tui/` | TUI chat client (bubbletea v2) |
 | `cmd/mcp/` | IaC MCP server — cloud deployment tools (HuaweiCloud, Aliyun) over MCP stdio |
+| `skills/` | Built-in embedded skills (`powerpoint`, `skill-creator`) + `embed.go` for go:embed |
+| `third_party/` | Vendored model assets (unused — embedding is external-provider-only; pending removal) |
+| `site/` | Next.js + React frontend control panel (channel status, settings, QR rendering) |

@@ -38,6 +38,8 @@
 
 ## 快速开始
 
+**前置条件：** Go 1.26.4+ 和一个 OpenAI 兼容的 API key。
+
 ```bash
 # 编译 CLI
 go build -o openagent ./cmd/cli/
@@ -80,7 +82,7 @@ go build -o openagent ./cmd/cli/
       "api_key": "sk-...",
       "models": ["gpt-4o"]
     }
-  },
+  }
 }
 ```
 
@@ -148,11 +150,10 @@ export BOCHA_API_KEY=<你的-key>   # 在 https://open.bochaai.com 获取
 
 **凭据解析优先级：**
 
-| 优先级 | 来源 | 场景 |
-|--------|------|------|
-| 1 | `settings.json` → `channels.feishu` | 已有应用凭据 |
-| 2 | settings.json `channels.feishu` | 上次扫码自动保存（settings 是唯一凭据源） |
-| 3 | 扫码注册 | 首次使用，无任何凭据 |
+| 状态 | 来源 | 场景 |
+|------|------|------|
+| 有凭据 | `settings.json` → `channels.feishu` | 已有应用凭据（手写配置或上次扫码自动保存） |
+| 无凭据 | 扫码注册 | 首次使用，无任何凭据 |
 
 **组合其他模式：**
 
@@ -166,7 +167,7 @@ export BOCHA_API_KEY=<你的-key>   # 在 https://open.bochaai.com 获取
 
 **前端控制面板：**
 
-飞书连接是**进程级守护任务** —— 前端只负责触发和展示，关闭/刷新页面不影响连接。服务暴露两个接口：
+飞书连接是**进程级守护任务** —— 前端只负责触发和展示，关闭/刷新页面不影响连接。服务暴露两组接口（频道控制 + 设置管理）：
 
 | 接口 | 用途 |
 |------|------|
@@ -182,7 +183,7 @@ export BOCHA_API_KEY=<你的-key>   # 在 https://open.bochaai.com 获取
 
 **每个配置目录单实例：** 一个飞书 app = 一个活跃 WebSocket。服务在连接期间持有机器级锁（`<config-dir>/channel/feishu/feishu.lock`）——第二个 `--channel feishu` 实例会快速失败报错，而不是静默抢走事件。进程死亡时锁由内核自动释放。生产部署建议用 systemd/Docker 托管进程（及其连接）。
 
-**配置 MCP 工具（可选）：**
+**配置 MCP 工具（可选，适用于所有模式）：**
 
 ```json
 {
@@ -338,6 +339,9 @@ OpenViking 是一个上下文数据库，提供服务端记忆、技能和资源
 │  └─ eventbus    (审计事件)                   │
 └──────────────────────────────────────────────┘
 ```
+
+> **流水线阶段（8 节点）：** 记忆 → 提示词 → 守卫 → 模型 → 守卫 → 策略 → 工具 → 存储。
+> 上方 6 个框是实现这些阶段的内核子组件。
 
 `agent.Agent` 是纯配置（模型、提示词、守卫、子 agent）；所有可执行逻辑都在运行时及其依赖中——工具、存储、策略、hooks、observer 均为组装时注入的接口。
 
@@ -536,15 +540,15 @@ openagent_pdk::export!(EnvSyncPlugin);
 | `examples/observer/` | Pipeline 观测器 |
 | `examples/delegate/` | Agent 作为工具委托 |
 | `examples/sandbox/` | 原生沙箱工具 |
-| `examples/plugin/` | WASM 工具、观测器、定时任务插件 |
+| `examples/plugin/` | WASM 工具、观测器、定时任务、模型切换插件 |
 | `examples/skill/` | 按需加载技能 |
 | `examples/acp/` | ACP agent 协议（server + client） |
 | `examples/artifact/` | 结果策略 — 大型工具结果落盘 |
 | `examples/browser-agent/` | 基于 Playwright MCP 的浏览器 agent |
 | `examples/mcp-client/` | MCP 客户端示例（IaC 流水线） |
-| `examples/frontend/` | Vue.js 前端控制面板（频道状态、设置、二维码渲染） |
+| `site/` | Next.js + React 前端控制面板（频道状态、设置、二维码渲染） |
 | `cmd/cli/` | 完整 CLI，含 WASM 插件运行时 |
-| `cmd/tui/` | TUI 聊天客户端（bubbletea v2，流式输出，人工审批） |
+| `cmd/cli/tui/` | TUI 聊天客户端（bubbletea v2，流式输出，人工审批） |
 
 ## 包
 
@@ -586,7 +590,7 @@ openagent_pdk::export!(EnvSyncPlugin);
 | `hooks/otel/` | OpenTelemetry 钩子 |
 | `hooks/slog/` | 结构化日志钩子 |
 | `hooks/redact/` | 工具结果中脱敏环境变量值 |
-| `tool/` | 内置工具 (shell, read, write, ls, grep, edit, websearch, webfetch, ACP fs, ACP terminal) |
+| `tool/` | 内置工具 (shell, read, write, edit, ls, grep, websearch, webfetch, browser, office, ACP fs, ACP terminal) |
 | `channel/` | IM 平台适配器 — 飞书（WebSocket、卡片渲染）、个人微信（ilinkai HTTP）、企业微信（长连接流式） |
 | `keyring/` | 系统密钥环封装（Linux Secret Service/kernel keyring、macOS Keychain、Windows Credential Manager） |
 | `process/` | 后台 shell 进程生命周期管理（跟踪、持久化输出、跨轮次终止） |
@@ -595,5 +599,8 @@ openagent_pdk::export!(EnvSyncPlugin);
 | `iac/` | Terraform 封装 — 二进制安装/镜像管理、init/plan/apply/destroy |
 | `version/` | 编译时二进制标识（名称 + 版本，经 ldflags 注入） |
 | `cmd/cli/` | CLI 运行时、WASM 宿主、REST/ACP 服务、设置、频道管理 |
-| `cmd/tui/` | TUI 聊天客户端（bubbletea v2） |
+| `cmd/cli/tui/` | TUI 聊天客户端（bubbletea v2） |
 | `cmd/mcp/` | IaC MCP 服务 — 云部署工具（华为云、阿里云），走 MCP stdio |
+| `skills/` | 内置嵌入技能（`powerpoint`、`skill-creator`）+ `embed.go` 用于 go:embed |
+| `third_party/` | 第三方模型资产（未使用 — embedding 已改为纯外部 provider；待清理） |
+| `site/` | Next.js + React 前端控制面板（频道状态、设置、二维码渲染） |

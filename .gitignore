@@ -48,7 +48,7 @@ Cargo.lock
 # .idea/
 # .vscode/
 
-# Frontend (Vue/Vite)
+# Frontend
 node_modules/
 dist/
 *.local
