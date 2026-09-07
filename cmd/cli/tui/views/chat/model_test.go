@@ -1915,6 +1915,42 @@ func TestRetryingRowLifecycle(t *testing.T) {
 	}
 }
 
+// TestPendingToolHiddenWhilePermissionOpen guards the approval flow: a tool
+// announced as ACP "pending" renders as a normal row until its permission
+// ask arrives, stays out of the transcript while the dialog is open (the
+// panel itself shows the call), and comes back once the dialog resolves.
+func TestPendingToolHiddenWhilePermissionOpen(t *testing.T) {
+	m := newTestModel()
+	m.width, m.height = 100, 40
+	m.inChat = true
+	m.messages = []ChatMessage{
+		{Role: "user", Content: "install it", TurnId: 1, CreatedAt: todayAt(10, 0)},
+		{Role: "tool", ToolName: "shell bun install", ToolStatus: toolPending,
+			ToolCallID: "tc1", TurnId: 1, CreatedAt: todayAt(10, 1)},
+	}
+
+	doc := utils.StripANSI(m.renderVirtualDoc(20))
+	if !strings.Contains(doc, "shell bun install") {
+		t.Fatalf("pending tool row must render without an open dialog:\n%s", doc)
+	}
+
+	m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
+		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1", Title: "shell bun install"},
+	}})
+	doc = utils.StripANSI(m.renderVirtualDoc(20))
+	if strings.Contains(doc, "shell bun install") {
+		t.Fatalf("pending tool row must be hidden while the dialog is open:\n%s", doc)
+	}
+
+	// Resolving the dialog brings the row back (the follow-up in_progress
+	// update then flips it to running through the same dedupe path).
+	m.permissionReq = nil
+	doc = utils.StripANSI(m.renderVirtualDoc(20))
+	if !strings.Contains(doc, "shell bun install") {
+		t.Fatalf("pending tool row must reappear once the dialog resolves:\n%s", doc)
+	}
+}
+
 func TestPermissionArrowsSwitchSelection(t *testing.T) {
 	m := newTestModel()
 	m.permissionReq = &openacp.RequestPermissionRequest{

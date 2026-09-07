@@ -405,7 +405,7 @@ type ChatMessage struct {
 	// tool-call messages (Role == "tool")
 	ToolCallID string
 	ToolName   string
-	ToolStatus string // "running" | "done" | "failed"
+	ToolStatus string // "pending" | "running" | "done" | "failed"
 	ToolInput  string
 	ToolOutput string
 
@@ -431,6 +431,7 @@ type ChatMessage struct {
 
 // tool status markers rendered in the transcript.
 const (
+	toolPending = "pending" // announced, not yet approved to run
 	toolRunning = "running"
 	toolDone    = "done"
 	toolFailed  = "failed"
@@ -1356,6 +1357,8 @@ func (m *Model) respondPermission(idx int) {
 	m.permissionReplyCh <- resp
 	m.permissionReq = nil
 	m.permissionReplyCh = nil
+	// The dialog closing unhides the pending tool rows it was suppressing.
+	m.viewportDirty = true
 }
 
 // escPressed implements Esc outside the permission dialog: it clears the
@@ -2319,7 +2322,7 @@ func (m *Model) renderMessages() string {
 // fingerprint it was styled under, so unchanged messages skip re-styling.
 type renderCacheEntry struct {
 	vpW                                                  int
-	loading, replaying, turnEnd                          bool
+	loading, replaying, turnEnd, permOpen                bool
 	expandThink, showSkill, showShell, showDetail        bool
 	thoughtStart, thoughtEnd, createdAt                  time.Time
 	compactStart, compactEnd                             time.Time
@@ -2336,11 +2339,14 @@ type renderCacheEntry struct {
 // its collapsed summary even though the content is unchanged. turnEnd and
 // replaying are in it too: a block gains (or loses) its turn-end marker row
 // when the next message arrives, the turn completes, or a replay finishes.
-func renderCacheHits(e renderCacheEntry, msg ChatMessage, vpW int, loading, replaying, turnEnd bool, vc components.VisibleConfig) bool {
+// permOpen gates unapproved tool rows: opening or closing the permission
+// dialog flips whether pending tool calls are hidden.
+func renderCacheHits(e renderCacheEntry, msg ChatMessage, vpW int, loading, replaying, turnEnd, permOpen bool, vc components.VisibleConfig) bool {
 	return e.vpW == vpW &&
 		e.loading == loading &&
 		e.replaying == replaying &&
 		e.turnEnd == turnEnd &&
+		e.permOpen == permOpen &&
 		e.expandThink == vc.ExpandThinking &&
 		e.showSkill == vc.ShowToolSkill &&
 		e.showShell == vc.ShowToolShell &&
@@ -2378,12 +2384,14 @@ func (m *Model) renderMessageBlock(i int, msg ChatMessage, vpW int) (block strin
 		}
 	}
 	turnEnd := m.isTurnEndAt(i, msg)
+	permOpen := m.permissionReq != nil
 	if e, ok := m.renderCache[msg.Seq]; ok &&
-		renderCacheHits(e, msg, vpW, m.loading, m.replaying, turnEnd, m.visibleConfig) {
+		renderCacheHits(e, msg, vpW, m.loading, m.replaying, turnEnd, permOpen, m.visibleConfig) {
 		return e.block, e.skip
 	}
 	e := renderCacheEntry{
 		vpW: vpW, loading: m.loading, replaying: m.replaying, turnEnd: turnEnd,
+		permOpen:      permOpen,
 		expandThink:   m.visibleConfig.ExpandThinking,
 		showSkill:     m.visibleConfig.ShowToolSkill,
 		showShell:     m.visibleConfig.ShowToolShell,
@@ -2632,6 +2640,14 @@ func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
 			return "", true
 		}
 		if isShellTool(msg.ToolName) && !m.visibleConfig.ShowToolShell {
+			return "", true
+		}
+		// A tool still awaiting approval stays out of the transcript while
+		// the permission dialog is open: the panel itself shows what is
+		// pending, and queued siblings (announced pending ahead of their
+		// turn) hide with it. After the dialog resolves the row appears in
+		// its running/done/failed state.
+		if msg.ToolStatus == toolPending && m.permissionReq != nil {
 			return "", true
 		}
 		return indentedBlock(m.toolBody(msg, vpW)), false

@@ -46,6 +46,10 @@ func TestTUPreview(t *testing.T) {
 	m.messages = append(m.messages,
 		ChatMessage{Role: "compact", TurnId: 1, CompactStart: todayAt(14, 26), CompactEnd: todayAt(14, 26).Add(8 * time.Second), CompactedMsgs: 24, FreedTokens: 3400},
 		ChatMessage{Role: "assistant", Content: "压缩完成后的回答。", TurnId: 2, CreatedAt: todayAt(14, 27)},
+		// The announced-but-unapproved call behind the permission panel: it
+		// must NOT list in the transcript while the dialog is open.
+		ChatMessage{Role: "tool", ToolName: "shell rm -rf build", ToolStatus: toolPending,
+			ToolCallID: "tc-perm", TurnId: 2, CreatedAt: todayAt(14, 28)},
 	)
 	m.inChat = true
 	// Sidebar context numbers mirror the style reference: 16,110 tokens,
@@ -57,9 +61,10 @@ func TestTUPreview(t *testing.T) {
 	// detail under the muted title).
 	m.permissionReq = &openacp.RequestPermissionRequest{
 		ToolCall: openacp.ToolCallUpdate{
-			Title:    "shell Read go.mod and README top",
-			Kind:     "execute",
-			RawInput: json.RawMessage(`{"command":"cat go.mod README.md | head -40"}`),
+			ToolCallID: "tc-perm",
+			Title:      "shell Read go.mod and README top",
+			Kind:       "execute",
+			RawInput:   json.RawMessage(`{"command":"cat go.mod README.md | head -40"}`),
 		},
 		Options: []openacp.PermissionOption{
 			{OptionID: "once", Name: "Allow once"},
@@ -81,5 +86,10 @@ func TestTUPreview(t *testing.T) {
 	}
 	if !strings.Contains(view, "┃") {
 		t.Error("preview missing message rails")
+	}
+	// The unapproved call must not list in the transcript while its
+	// permission dialog is open.
+	if strings.Contains(view, "rm -rf build") {
+		t.Error("pending tool call listed in transcript during permission dialog")
 	}
 }

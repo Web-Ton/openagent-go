@@ -111,8 +111,15 @@ func (h *acpEventHandler) OnContextCompacted(meta map[string]any) {
 }
 
 func (h *acpEventHandler) OnToolCall(tc openacp.ToolCallUpdate) {
+	// ACP 3-phase lifecycle: "pending" = announced but not yet approved to
+	// run (kept off the transcript while its permission dialog is open),
+	// "in_progress" = actually executing. Unknown statuses render as running.
 	msg := toolCallMsg{id: tc.ToolCallID, title: tc.Title, status: toolRunning, createdAt: acpMetaTime(tc.Meta)}
 	switch tc.Status {
+	case "pending":
+		msg.status = toolPending
+	case "in_progress":
+		msg.status = toolRunning
 	case "completed":
 		msg.status = toolDone
 	case "failed":
