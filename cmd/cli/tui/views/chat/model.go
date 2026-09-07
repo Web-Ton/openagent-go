@@ -131,6 +131,14 @@ type Model struct {
 	// LLM), so its textual echo is suppressed — the two-state compact block
 	// in the transcript is the display.
 	compacting bool
+	// retry is set while the kernel backs off between model attempts; it
+	// renders the transient retry divider and clears on the next streamed
+	// content (the model is producing again) or at turn end.
+	retry *retryState
+	// lastTurnRetries counts the retries of the most recent turn; the
+	// turn-end info row appends "N retries" from it. Reset when the next
+	// prompt is appended — client-side diagnostics only.
+	lastTurnRetries int
 
 	// input cursor blink
 	blinkCount int
@@ -587,6 +595,25 @@ type agentThoughtMsg struct {
 	createdAt time.Time
 }
 type contextCompactingMsg struct{ totalMessages int }
+
+// retryingMsg — sessionUpdate "agent_retrying": the model call hit a
+// transient error and the kernel backs off before the next attempt.
+// Turn-scoped transient state: never stored, never replayed.
+type retryingMsg struct {
+	attempt   int           // 1-based: the upcoming attempt
+	max       int           // retry ceiling (kernel callModel)
+	delay     time.Duration // this attempt's backoff (Retry-After aware)
+	errStr    string
+	startedAt time.Time
+}
+
+// retryState drives the transient retry divider at the transcript tail.
+type retryState struct {
+	attempt, max int
+	delay        time.Duration
+	startedAt    time.Time
+	err          string
+}
 type contextCompactedMsg struct {
 	compressed int
 	freed      int
@@ -713,6 +740,15 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewportDirty = true
 		return m, nil
 
+	case retryingMsg:
+		m.retry = &retryState{
+			attempt: msg.attempt, max: msg.max, delay: msg.delay,
+			startedAt: msg.startedAt, err: msg.errStr,
+		}
+		m.lastTurnRetries = msg.attempt
+		m.viewportDirty = true
+		return m, nil
+
 	case tea.KeyMsg:
 		// Panel open: route keys to the panel until closed (see
 		// handlePanelKey). The help panel is dismiss-only; sessions/models
@@ -802,6 +838,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.updateInputWidth() // welcome box is narrower than chat; re-fit on page switch
 					m.inputQueue = append(m.inputQueue, text)
 					m.promptCount++
+					m.lastTurnRetries = 0
 					m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId, CreatedAt: time.Now()})
 					m.chatTextarea.SetValue("")
 					m.viewportDirty = true
@@ -824,6 +861,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.inputQueue = append(m.inputQueue, text)
 					m.promptCount++
 					m.closeTrailingThought()
+					m.lastTurnRetries = 0
 					m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId, CreatedAt: time.Now()})
 					m.chatTextarea.SetValue("")
 					m.viewportDirty = true
@@ -969,6 +1007,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case agentMessageMsg:
+		m.retry = nil
 		if m.compacting {
 			// /compact round-trip's textual echo: suppressed — the compact
 			// block in the transcript already carries the outcome.
@@ -984,6 +1023,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.trimMessageStore()
 		return m.markContentDirty()
 	case agentThoughtMsg:
+		m.retry = nil
 		if n := len(m.messages); n > 0 && m.messages[n-1].Role == "thought" && m.messages[n-1].TurnId == m.turnId {
 			m.messages[n-1].Content += msg.text
 			m.messages[n-1].CreatedAt = m.stampACPMeta(msg.createdAt)
@@ -1011,6 +1051,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case promptDoneMsg:
+		m.retry = nil
 		if m.compacting {
 			// /compact round-trip finished: the compact block already shows
 			// the outcome, nothing more to surface.
@@ -1255,6 +1296,11 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spinnerTickMsg:
 		m.spinner = m.spinner.Tick()
+		if m.retry != nil {
+			// Retry divider shows a next-attempt countdown: refeed the
+			// document so the seconds tick down.
+			m.viewportDirty = true
+		}
 		return m, spinnerTick()
 
 	case blinkTickMsg:
@@ -1571,6 +1617,8 @@ func (m *Model) executeCommand(pc panelCommand) (tea.Model, tea.Cmd) {
 		m.messages = nil
 		m.renderCache = nil
 		m.renderSeq = 0
+		m.retry = nil
+		m.lastTurnRetries = 0
 		m.inputQueue = nil
 		m.pendingConfigSet = nil
 		m.usedTokens, m.contextSize, m.promptCount = 0, 0, 0
@@ -2400,6 +2448,13 @@ func (m *Model) turnEndMarkerRow(i int, msg ChatMessage, vpW int) string {
 			parts += sep
 		}
 		parts += muted.Render(formatThoughtDuration(d))
+		first = false
+	}
+	if m.lastTurnRetries > 0 {
+		if !first {
+			parts += sep
+		}
+		parts += muted.Render(fmt.Sprintf("%d retries", m.lastTurnRetries))
 	}
 	return theme.BaseStyle().Render(strings.Repeat(" ", transcriptIndent)) +
 		utils.TruncateStyled(parts, max(1, vpW-transcriptIndent))

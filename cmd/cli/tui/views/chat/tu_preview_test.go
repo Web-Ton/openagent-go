@@ -62,6 +62,9 @@ func TestTUPreview(t *testing.T) {
 		},
 	}
 	m.permissionSelectedIdx = 1
+	// A mid-backoff retry renders the transient divider at the tail.
+	m.retry = &retryState{attempt: 2, max: 5, delay: 4 * time.Second,
+		startedAt: time.Now(), err: "429 too many requests"}
 	m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
 	m.needAutoScroll = false
 	view := m.View().Content

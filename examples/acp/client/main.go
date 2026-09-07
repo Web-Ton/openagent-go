@@ -86,3 +86,4 @@ func (p *eventPrinter) OnSessionInfo(title string, metadata map[string]any)     
 func (p *eventPrinter) OnUserMessage(text string, meta map[string]any)            {}
 func (p *eventPrinter) OnContextCompacting(meta map[string]any)                   {}
 func (p *eventPrinter) OnContextCompacted(meta map[string]any)                    {}
+func (p *eventPrinter) OnRetrying(meta map[string]any)                            {}

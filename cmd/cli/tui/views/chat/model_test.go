@@ -1878,6 +1878,43 @@ func TestModePanelAppliesViaSetConfigOption(t *testing.T) {
 	}
 }
 
+// TestRetryingRowLifecycle: the agent_retrying update renders the
+// transient backoff divider at the transcript tail (attempt progress,
+// provider error, countdown); any streamed content clears it — the model
+// is producing again — and the turn-end info row carries the retry count.
+func TestRetryingRowLifecycle(t *testing.T) {
+	m := newTestModel()
+	m.width, m.height = 100, 40
+	m.inChat = true
+	m.messages = []ChatMessage{{Role: "user", Content: "hi", TurnId: 0, CreatedAt: todayAt(10, 0)}}
+
+	if strings.Contains(m.renderVirtualDoc(20), "Retrying") {
+		t.Fatal("retry divider must be absent without a retry")
+	}
+
+	m.Update(retryingMsg{attempt: 2, max: 5, delay: 4 * time.Second,
+		errStr: "429 too many requests", startedAt: time.Now()})
+	doc := utils.StripANSI(m.renderVirtualDoc(20))
+	if !strings.Contains(doc, "Retrying 2/5") || !strings.Contains(doc, "429 too many requests") ||
+		!strings.Contains(doc, "next in") {
+		t.Errorf("retry divider missing or incomplete:\n%s", doc)
+	}
+
+	m.Update(agentMessageMsg{text: "recovered"})
+	if strings.Contains(m.renderVirtualDoc(20), "Retrying") {
+		t.Error("retry divider must clear once the model streams again")
+	}
+
+	m.Update(promptDoneMsg{})
+	m.loading = false
+	// The turn-end info row rides the turn's last message (the assistant).
+	last := len(m.messages) - 1
+	rendered, _ := m.renderMessageBlock(last, m.messages[last], layout.GetTranscriptWidth(m.width))
+	if !strings.Contains(utils.StripANSI(rendered), "2 retries") {
+		t.Errorf("turn-end info row should carry the retry count:\n%s", utils.StripANSI(rendered))
+	}
+}
+
 func TestPermissionArrowsSwitchSelection(t *testing.T) {
 	m := newTestModel()
 	m.permissionReq = &openacp.RequestPermissionRequest{

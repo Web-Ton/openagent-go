@@ -92,6 +92,16 @@ func (h *acpEventHandler) OnContextCompacting(meta map[string]any) {
 	h.program.Send(contextCompactingMsg{totalMessages: acpMetaInt(meta, "total_messages")})
 }
 
+func (h *acpEventHandler) OnRetrying(meta map[string]any) {
+	h.program.Send(retryingMsg{
+		attempt:   acpMetaInt(meta, "attempt"),
+		max:       acpMetaInt(meta, "max_retries"),
+		delay:     time.Duration(acpMetaInt(meta, "delay_ms")) * time.Millisecond,
+		errStr:    acpMetaStr(meta, "error"),
+		startedAt: time.Now(),
+	})
+}
+
 func (h *acpEventHandler) OnContextCompacted(meta map[string]any) {
 	h.program.Send(contextCompactedMsg{
 		compressed: acpMetaInt(meta, "compressed_messages"),

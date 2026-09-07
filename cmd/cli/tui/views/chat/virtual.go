@@ -1,7 +1,9 @@
 package chat
 
 import (
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/yusheng-g/openagent-go/cmd/cli/tui/layout"
 	"github.com/yusheng-g/openagent-go/cmd/cli/tui/theme"
@@ -223,7 +225,34 @@ func (m *Model) renderVirtualDocAt(height, offset int) string {
 	}
 	emitPlaceholder(below)
 
-		// TrimSuffix, not TrimRight: the below-window bulk is bare newlines and
+	// Transient retry divider: turn-scoped operational state from the
+	// agent_retrying session update — appended after the last message row,
+	// never part of the message store, gone once the model produces again.
+	if m.retry != nil {
+		b.WriteString("\n")
+		b.WriteString(fitRow(m.retryRow(vpW), vpW))
+	}
+
+	// TrimSuffix, not TrimRight: the below-window bulk is bare newlines and
 	// must survive as empty lines (TrimRight would collapse the row count).
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// retryRow renders the transient backoff divider shown while the kernel
+// waits between model attempts: attempt progress, the provider error, and
+// a next-attempt countdown (fed once a second by the spinner tick). The
+// same centered-rule language as the compaction divider, in warning color.
+func (m *Model) retryRow(vpW int) string {
+	r := m.retry
+	remaining := r.delay - time.Since(r.startedAt)
+	if remaining < 0 {
+		remaining = 0
+	}
+	label := fmt.Sprintf("Retrying %d/%d", r.attempt, r.max)
+	if r.err != "" {
+		err := utils.TruncateByWidth(r.err, 48)
+		label += " · " + err
+	}
+	label += fmt.Sprintf(" · next in %ds", int(remaining.Seconds())+1)
+	return centerRule(label, vpW, theme.Warning)
 }

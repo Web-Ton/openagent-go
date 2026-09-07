@@ -475,6 +475,12 @@ type EventHandler interface {
 	// finished. meta carries "compressed_messages" and "freed_tokens" on
 	// success, "error" on failure.
 	OnContextCompacted(meta map[string]any)
+	// OnRetrying — sessionUpdate "agent_retrying": the model call hit a
+	// transient error and the kernel backs off before the next attempt.
+	// meta carries "attempt" (1-based, the upcoming attempt), "max_retries",
+	// "delay_ms" and "error". Turn-scoped transient state: never stored,
+	// never replayed.
+	OnRetrying(meta map[string]any)
 	// OnToolCall — sessionUpdate "tool_call" / "tool_call_update".
 	OnToolCall(tc ToolCallUpdate)
 	// OnPlan — sessionUpdate "plan".
@@ -729,6 +735,8 @@ func (s *Session) dispatchSessionUpdate(params json.RawMessage) {
 		h.OnContextCompacting(u.Meta)
 	case "context_compacted":
 		h.OnContextCompacted(u.Meta)
+	case "agent_retrying":
+		h.OnRetrying(u.Meta)
 	case "config_option_update":
 		h.OnConfigOptionUpdate(u.ConfigOptions)
 	case "usage_update":
