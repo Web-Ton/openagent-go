@@ -5,6 +5,14 @@
       <stop offset="0%" stop-color="#00ADD8"/>
       <stop offset="100%" stop-color="#0080FF"/>
     </linearGradient>
+    <style>
+      .fg { fill: #24292f; }
+      .dim { fill: #24292f; opacity: 0.4; }
+      @media (prefers-color-scheme: dark) {
+        .fg { fill: #e6edf3; }
+        .dim { fill: #e6edf3; opacity: 0.4; }
+      }
+    </style>
   </defs>
   <!-- left ring (o) -->
   <circle cx="22" cy="30" r="16" stroke="url(#g)" stroke-width="5" fill="none"/>
@@ -12,8 +20,9 @@
   <path d="M 46 30 A 16 16 0 1 1 62 14" stroke="url(#g)" stroke-width="5" fill="none" stroke-linecap="round"/>
   <!-- connector dot — the "plug" -->
   <circle cx="54" cy="30" r="4" fill="url(#g)"/>
-  <!-- wordmark: open in white, agent in cyan, -go dimmed -->
-  <text x="80" y="38" font-family="system-ui, -apple-system, sans-serif" font-size="22" font-weight="700" fill="#ffffff">
-    open<tspan fill="#00ADD8">agent</tspan><tspan fill="#ffffff" opacity="0.4" font-weight="500">-go</tspan>
+  <!-- wordmark: open + -go adapt to theme via prefers-color-scheme;
+       agent stays Go cyan in both themes -->
+  <text x="80" y="38" font-family="system-ui, -apple-system, sans-serif" font-size="22" font-weight="700" class="fg">
+    open<tspan fill="#00ADD8">agent</tspan><tspan class="dim" font-weight="500">-go</tspan>
   </text>
 </svg>
