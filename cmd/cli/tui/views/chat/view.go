@@ -515,7 +515,11 @@ func (m *Model) renderScrollbar(height int) string {
 }
 
 // renderPermissionPanel renders an inline panel (replacing the input area)
-// showing the tool call that needs approval. Bottom-aligned above status.
+// showing the tool call that needs approval, styled after opencode's
+// permission prompt: a warning left rail on the panel background, a
+// two-line header ("⚠ Permission required" over the tool title), and the
+// options as horizontal chips on a surface strip where the selected chip is
+// filled with the warning color. Bottom-aligned above status.
 func (m *Model) renderPermissionPanel(width, _ int) string {
 	req := m.permissionReq
 	tc := req.ToolCall
@@ -524,49 +528,49 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 		title = "Tool Call"
 	}
 
-	contentW := width
-	contentStyle := theme.BaseStyle().Width(contentW).Background(theme.BgPanel)
+	panel := theme.BaseStyle().Background(theme.BgPanel)
 	yellow := lipgloss.Color("#ffd60a")
-	warnStyle := theme.BaseStyle().Background(theme.BgPanel).Foreground(yellow)
+	warn := theme.BaseStyle().Background(theme.BgPanel).Foreground(yellow)
 
-	icon := warnStyle.Render("⚠")
-	allow := warnStyle.Bold(true).Render("allow")
-	space := warnStyle.Render(" ")
-	toolName := warnStyle.Render(title)
-	question := warnStyle.Render("?")
-	headerTitle := contentStyle.Render(lipgloss.JoinHorizontal(lipgloss.Left, icon, space, allow, space, toolName, question))
+	header := lipgloss.JoinVertical(lipgloss.Left,
+		panel.Render(lipgloss.JoinHorizontal(lipgloss.Left,
+			warn.Render("⚠"),
+			panel.Foreground(theme.TextNormal).Render(" Permission required"),
+		)),
+		panel.Foreground(theme.TextNormal).Render("  "+title),
+	)
 
-	// Options: one per line, full width, separator line between them.
-	// Selected option uses Primary foreground + "▶" marker.
-	sep := contentStyle.Foreground(theme.BorderGray).Render(strings.Repeat("─", contentW-1))
-	optionParts := make([]string, 0, len(req.Options)*2)
+	chipParts := make([]string, 0, len(req.Options)*2)
 	for i, opt := range req.Options {
 		name := opt.Name
 		if name == "" {
 			name = string(opt.OptionID)
 		}
-		marker := "  "
-		optStyle := contentStyle.Foreground(theme.TextAsh)
-		if i == m.permissionSelectedIdx {
-			marker = "▶ "
-			optStyle = contentStyle.Foreground(theme.Primary)
+		if i > 0 {
+			chipParts = append(chipParts, panel.Render("  "))
 		}
-		optionParts = append(optionParts, optStyle.Render(marker+name))
-		if i < len(req.Options)-1 {
-			optionParts = append(optionParts, sep)
+		if i == m.permissionSelectedIdx {
+			chipParts = append(chipParts,
+				theme.BaseStyle().Background(theme.Warning).Foreground(theme.TextInk).Render(" "+name+" "))
+		} else {
+			chipParts = append(chipParts, panel.Foreground(theme.TextAsh).Render(name))
 		}
 	}
-	optionList := lipgloss.JoinVertical(lipgloss.Left, optionParts...)
+	chips := lipgloss.JoinHorizontal(lipgloss.Left, chipParts...)
 
-	footer := contentStyle.PaddingRight(1).Align(lipgloss.Right).Render(
-		lipgloss.JoinHorizontal(lipgloss.Right,
-			components.RenderCommandTipSurface("↑ ↓", "switch"),
-			components.RenderCommandTipSurface("esc", "cancel"),
-			components.RenderCommandTipSurface("enter", "select"),
-		),
+	tips := lipgloss.JoinHorizontal(lipgloss.Right,
+		components.RenderCommandTipOn("↑ ↓", "switch", theme.BgSurface),
+		components.RenderCommandTipOn("esc", "cancel", theme.BgSurface),
+		components.RenderCommandTipOn("enter", "select", theme.BgSurface),
 	)
+	gap := width - utils.DisplayWidth(chips) - utils.DisplayWidth(tips) - 2
+	if gap < 2 {
+		gap = 2
+	}
+	footer := theme.BaseStyle().Width(width).Background(theme.BgSurface).
+		Render(lipgloss.JoinHorizontal(lipgloss.Left, chips, strings.Repeat(" ", gap), tips))
 
-	content := lipgloss.JoinVertical(lipgloss.Left, headerTitle, "", optionList, "", footer)
+	content := lipgloss.JoinVertical(lipgloss.Left, header, "", footer)
 
 	borderColor := theme.Warning
 	return theme.BaseStyle().
