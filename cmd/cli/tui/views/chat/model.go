@@ -2696,44 +2696,9 @@ func (m *Model) thoughtBlock(msg ChatMessage, content string, vpW int) (string, 
 			Render(wrapPlain(collapseBlankLines(content), vpW-transcriptIndent))
 		return indentedBlock(header + "\n" + body), false
 	}
-	// Collapsed: one row — header, then a first-line preview truncated to
-	// the viewport so the row never soft-wraps (fitRow would cut it ragged
-	// mid-glyph otherwise).
-	sep := theme.BaseStyle().Foreground(theme.TextMute).Render(" · ")
-	preview := thoughtPreview(content)
-	if budget := vpW - transcriptIndent - utils.DisplayWidth(header) - utils.DisplayWidth(sep); budget > 0 && preview != "" {
-		dimmed := theme.BaseStyle().Foreground(theme.TextMute).
-			Render(utils.TruncateByWidth(preview, budget))
-		return indentedBlock(header + sep + dimmed), false
-	}
+	// Collapsed: the header row only — the duration is the information (the
+	// body stays behind the "+" until /toggle_thinking expands it).
 	return indentedBlock(header), false
-}
-
-// thoughtPreview returns the first non-empty line of a thought's content
-// for the collapsed one-liner, with "…" appended when further non-empty
-// lines follow (a blank-line-only tail stays unmarked).
-func thoughtPreview(content string) string {
-	var first string
-	more := false
-	for _, ln := range strings.Split(content, "\n") {
-		t := strings.TrimSpace(ln)
-		if t == "" {
-			continue
-		}
-		if first == "" {
-			first = t
-			continue
-		}
-		more = true
-		break
-	}
-	if first == "" {
-		return ""
-	}
-	if more {
-		return first + "…"
-	}
-	return first
 }
 
 // compactBlock renders the two-state compaction marker as a full-width

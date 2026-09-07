@@ -1129,12 +1129,12 @@ func TestToolRowTitleDeduplicatesArgs(t *testing.T) {
 
 func TestThoughtCollapsedByDefault(t *testing.T) {
 	m := newTestModel()
-	// Collapsed shows only the first-line preview; later lines stay hidden
-	// until the thought is expanded (globally via /toggle_thinking).
+	// Collapsed shows the header only — no content leaks until the thought
+	// is expanded (globally via /toggle_thinking).
 	m.messages = append(m.messages, ChatMessage{Role: "thought", Content: "secret reasoning\nmore hidden steps", TurnId: 0})
 	rendered := m.renderMessages()
-	if strings.Contains(rendered, "more hidden steps") {
-		t.Error("collapsed thought must not show its body lines by default")
+	if strings.Contains(rendered, "secret reasoning") || strings.Contains(rendered, "more hidden steps") {
+		t.Error("collapsed thought must not show any content by default")
 	}
 	if !strings.Contains(rendered, "Thought") {
 		t.Error("collapsed thought should show a summary line")
@@ -1157,9 +1157,9 @@ func TestThoughtCollapsedByDefault(t *testing.T) {
 
 // TestThoughtSummaryStates covers the three header states and the new
 // collapsed/expanded rhythm: the streaming thought auto-expands (full
-// content under "Thinking..."), a measured span collapses to the duration
-// header plus a first-line preview, and a replayed span of unknown length
-// shows a bare "Thought" header with the same preview.
+// content under "Thinking..."), a measured span collapses to the bare
+// duration header, and a replayed span of unknown length shows a bare
+// "Thought" header — no content in either collapsed state.
 func TestThoughtSummaryStates(t *testing.T) {
 	m := newTestModel()
 	streaming := ChatMessage{Role: "thought", Content: "mid-flight", TurnId: 0, ThoughtStart: time.Now()}
@@ -1171,20 +1171,21 @@ func TestThoughtSummaryStates(t *testing.T) {
 	m.loading = false
 	done := ChatMessage{Role: "thought", Content: "past", TurnId: 0,
 		ThoughtStart: time.Now().Add(-1500 * time.Millisecond), ThoughtEnd: time.Now()}
-	if got, _ := m.renderMessageBlock(0, done, layout.GetTranscriptWidth(m.width)); !strings.Contains(got, "+ Thought: 1.5s") || !strings.Contains(utils.StripANSI(got), "past") {
-		t.Errorf("collapsed thought should show + marker with duration and a preview:\n%s", utils.StripANSI(got))
+	got, _ := m.renderMessageBlock(0, done, layout.GetTranscriptWidth(m.width))
+	if !strings.Contains(got, "+ Thought: 1.5s") || strings.Contains(utils.StripANSI(got), "past") {
+		t.Errorf("collapsed thought should show the duration header only:\n%s", utils.StripANSI(got))
 	}
 
 	replayed := ChatMessage{Role: "thought", Content: "from history", TurnId: 0}
-	if got, _ := m.renderMessageBlock(0, replayed, layout.GetTranscriptWidth(m.width)); !strings.Contains(got, "+ Thought") || !strings.Contains(utils.StripANSI(got), "from history") {
-		t.Errorf("replayed thought should show a bare + header with a preview:\n%s", utils.StripANSI(got))
+	if got, _ := m.renderMessageBlock(0, replayed, layout.GetTranscriptWidth(m.width)); !strings.Contains(got, "+ Thought") || strings.Contains(utils.StripANSI(got), "from history") {
+		t.Errorf("replayed thought should show a bare + header without content:\n%s", utils.StripANSI(got))
 	}
 }
 
 // TestThoughtStreamingCollapsesOnClose pins the auto-expand rhythm: the
 // open thought streams its full content under "Thinking...", and once the
 // turn closes (ThoughtEnd stamped, loading off) the same block renders
-// collapsed — header plus a first-line preview, body gone.
+// collapsed to the header — all body content gone.
 func TestThoughtStreamingCollapsesOnClose(t *testing.T) {
 	m := newTestModel()
 	vpW := layout.GetTranscriptWidth(m.width)
@@ -1200,18 +1201,17 @@ func TestThoughtStreamingCollapsesOnClose(t *testing.T) {
 	closed.ThoughtEnd = time.Now()
 	got, _ = m.renderMessageBlock(1, closed, vpW)
 	plain := utils.StripANSI(got)
-	if strings.Contains(plain, "step two") {
-		t.Errorf("closed thought should collapse to the first-line preview:\n%s", plain)
+	if strings.Contains(plain, "step one") || strings.Contains(plain, "step two") {
+		t.Errorf("closed thought should collapse to the bare header:\n%s", plain)
 	}
-	if !strings.Contains(plain, "Thought") || !strings.Contains(plain, "step one…") {
-		t.Errorf("closed thought should carry the header and preview:\n%s", plain)
+	if !strings.Contains(plain, "+ Thought") {
+		t.Errorf("closed thought should carry the header:\n%s", plain)
 	}
 }
 
-// TestThoughtCollapsedPreviewFitsRow keeps the collapsed one-liner inside
-// the viewport width: a long single-line thought is truncated with an
-// ellipsis instead of soft-wrapping into multiple rows.
-func TestThoughtCollapsedPreviewFitsRow(t *testing.T) {
+// TestThoughtCollapsedStaysOneRow keeps the collapsed header a single row
+// no matter how long the hidden content is.
+func TestThoughtCollapsedStaysOneRow(t *testing.T) {
 	m := newTestModel()
 	m.loading = false
 	vpW := layout.GetTranscriptWidth(m.width)
@@ -1229,22 +1229,6 @@ func TestThoughtCollapsedPreviewFitsRow(t *testing.T) {
 	}
 	if w := utils.DisplayWidth(lines[0]); w > vpW {
 		t.Errorf("collapsed row width %d exceeds viewport %d: %q", w, vpW, lines[0])
-	}
-	if !strings.HasSuffix(strings.TrimRight(lines[0], " "), "…") {
-		t.Errorf("truncated preview should end with the ellipsis: %q", lines[0])
-	}
-}
-
-// TestThoughtPreviewMarksMoreLines: the collapsed preview shows the first
-// non-empty line of a multi-line thought and marks the rest with an
-// ellipsis; later lines never leak onto the row.
-func TestThoughtPreviewMarksMoreLines(t *testing.T) {
-	m := newTestModel()
-	msg := ChatMessage{Role: "thought", Content: "\n first line \n\nsecond line\n", TurnId: 1}
-	got, _ := m.renderMessageBlock(0, msg, layout.GetTranscriptWidth(m.width))
-	plain := utils.StripANSI(got)
-	if !strings.Contains(plain, "first line…") || strings.Contains(plain, "second line") {
-		t.Errorf("preview should carry the first non-empty line with a marker:\n%s", plain)
 	}
 }
 
