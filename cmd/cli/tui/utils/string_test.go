@@ -90,12 +90,25 @@ func TestOverlayBackground(t *testing.T) {
 		t.Fatalf("empty range changed the input: %q", got)
 	}
 	// Existing foreground styling survives inside the range and is restored
-	// after it.
+	// after it. The input's own reset between spans sits inside the range,
+	// so it comes back with the selection background re-applied (the exit
+	// then restores the plain style at "rest").
 	styled := "a\x1b[31mred\x1b[0mrest"
 	got = OverlayBackground(styled, 1, 4, bg)
-	want := "a\x1b[31m\x1b[0m\x1b[31;" + bg + "mred\x1b[0m\x1b[0mrest"
+	want := "a\x1b[31m\x1b[0m\x1b[31;" + bg + "mred\x1b[0m\x1b[" + bg + "m\x1b[0mrest"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+	// Transcript-shaped line: a styled span, a mid-line reset, more text —
+	// the selection background must survive the reset instead of letting
+	// the first span boundary wipe the highlight for the rest of the line.
+	row := "\x1b[38;2;100;98;98;48;2;0;0;0m> pptx_read\x1b[m\x1b[38;2;100;98;98;48;2;0;0;0m [README.md]\x1b[m"
+	got = OverlayBackground(row, 0, 40, bg)
+	if !strings.Contains(got, "48;2;38;70;109m [README.md]") {
+		t.Fatalf("text after a mid-line reset must render selected: %q", got)
+	}
+	if strings.Count(got, bg) < 3 {
+		t.Fatalf("selection background lost across the line: %q", got)
 	}
 	// A combined fg+bg sequence (lipgloss emits one SGR with both) keeps its
 	// foreground whole when the background is swapped: the "48;2;R;G;B"

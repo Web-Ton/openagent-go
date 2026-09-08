@@ -191,9 +191,24 @@ func OverlayBackground(s string, from, to int, bgCode string) string {
 				continue
 			}
 			seq := rest[:loc[1]]
-			active = updateSGRState(active, seq)
-			b.WriteString(seq)
 			rest = rest[loc[1]:]
+			if !sgrStateRe.MatchString(seq) {
+				// Non-style CSI: no cell styling, pass through.
+				b.WriteString(seq)
+				continue
+			}
+			active = updateSGRState(active, seq)
+			if inSel {
+				// Transcript rows carry their own resets between styled
+				// spans; inside the selection each of those resets must
+				// come back WITH the selection background, or the first
+				// span boundary wipes the highlight for the rest of the
+				// line. Re-emit the folded style instead of the raw
+				// sequence.
+				b.WriteString(overlaySGR(active, true, bgCode))
+			} else {
+				b.WriteString(seq)
+			}
 			continue
 		}
 		r, size := utf8.DecodeRuneInString(rest)
