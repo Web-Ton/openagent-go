@@ -621,9 +621,12 @@ func (t *getDeploymentStatusTool) Execute(ctx context.Context, args json.RawMess
 	// the client gets a usable identifier for each resource.
 	var state struct {
 		Resources []struct {
-			Address string `json:"address"` // absent in state v4; kept for forward-compat
-			Type    string `json:"type"`
-			Name    string `json:"name"`
+			Address   string `json:"address"` // absent in state v4; kept for forward-compat
+			Type      string `json:"type"`
+			Name      string `json:"name"`
+			Instances []struct {
+				Attributes map[string]any `json:"attributes,omitempty"`
+			} `json:"instances,omitempty"`
 		} `json:"resources"`
 		Outputs map[string]struct {
 			Value any `json:"value"`
@@ -635,18 +638,24 @@ func (t *getDeploymentStatusTool) Execute(ctx context.Context, args json.RawMess
 	}
 
 	// Build resource summaries with a non-empty address (type.name when the
-	// state file omits it).
-	resources := make([]map[string]string, 0, len(state.Resources))
+	// state file omits it). Include the first instance's attributes so callers
+	// can read key values (e.g. EIP address, ECS id/flavor/public_ip) without
+	// a separate query_cloud round-trip.
+	resources := make([]map[string]any, 0, len(state.Resources))
 	for _, r := range state.Resources {
 		addr := r.Address
 		if addr == "" && r.Type != "" && r.Name != "" {
 			addr = r.Type + "." + r.Name
 		}
-		resources = append(resources, map[string]string{
+		entry := map[string]any{
 			"address": addr,
 			"type":    r.Type,
 			"name":    r.Name,
-		})
+		}
+		if len(r.Instances) > 0 && r.Instances[0].Attributes != nil {
+			entry["attributes"] = r.Instances[0].Attributes
+		}
+		resources = append(resources, entry)
 	}
 
 	summary := map[string]any{
