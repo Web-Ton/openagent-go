@@ -98,18 +98,24 @@ func (c *Compressor) Summarize(ctx context.Context, messages []openagent.Message
 	// backoff. The per-call timeout below is the primary defense against a
 	// hung gateway: without it a single 504 blocks the run for up to the
 	// model client's HTTP timeout (5m), and with retries that compounds to
-	// ~10m of dead time before the error surfaces. Retries stay modest
+	// ~15m of dead time before the error surfaces. Retries stay modest
 	// (2, not 5) because compaction runs on the prepare-memory critical
-	// path every turn — a persistently failing gateway is better fast-
-	// failed (degrade to tail-trim in prepare.go) than retried into a
-	// multi-minute stall.
+	// path — a persistently failing gateway is better fast-failed (degrade
+	// to tail-trim in prepare.go) than retried into a long stall.
+	//
+	// 3 minutes per call: a large compaction (80% of the working set folded
+	// into an existing summary) sends a big prompt to the summarizer model,
+	// and 90s was too tight for slow gateways — the manual /compact path
+	// (which compresses the entire session) regularly timed out. With the
+	// 80% CompactRatio, compaction fires far less often (once every many
+	// turns, not every turn), so a longer per-call wait is acceptable.
 	//
 	// Backoff sequence (seconds): 2, 4 — 2 retries, ~6s total.
 	// A provider-supplied RetryAfter (e.g. 429 Retry-After header) overrides
 	// the computed value for that attempt.
 	const (
 		maxRetries  = 2
-		callTimeout = 90 * time.Second
+		callTimeout = 3 * time.Minute
 	)
 	var lastErr error
 	var resp *openagent.ChatCompletionResponse
@@ -146,8 +152,9 @@ func (c *Compressor) Summarize(ctx context.Context, messages []openagent.Message
 		}
 		// A per-call timeout surfaces as context.DeadlineExceeded, which is
 		// NOT a RetryableError — it fails fast instead of retrying into
-		// another 90s stall. This is intentional: a gateway slow enough to
-		// trip 90s is unlikely to recover on the immediate next attempt.
+		// another 3-minute stall. This is intentional: a gateway slow enough
+		// to trip the timeout is unlikely to recover on the immediate next
+		// attempt.
 		var re *openagent.RetryableError
 		if !errors.As(err, &re) {
 			return nil, fmt.Errorf("summarizer: model call: %w", err)

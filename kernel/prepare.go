@@ -140,11 +140,26 @@ func (rt *Runtime) prepareMemory(ctx context.Context, session openagent.Session,
 	// ── Compaction pass: compress overflow messages ──
 	// The token scan walks only the post-summary increment (already
 	// compressed messages are not fetched at all).
+	//
+	// CompactRatio: instead of keeping the working set flush against the
+	// budget (compress just the overflow), compress a FRACTION of the budget
+	// so the retained working set sits well below the budget. Default 0.8:
+	// compress 80%, retain 20%. This leaves headroom for several turns of
+	// tool results and model replies before compaction re-triggers — the
+	// "compress just the overflow" strategy leaves the working set at ~100%
+	// of budget, so any new message trips compaction again next turn (a
+	// positive-feedback loop: each pass grows the summary, which shrinks
+	// the budget, which re-triggers compaction that grows the summary…).
+	retainFraction := 1.0 - rt.cfg.CompactRatio
+	if retainFraction <= 0 || retainFraction >= 1 {
+		retainFraction = 0.2 // default 0.8 ratio → retain 20%
+	}
+	retainTarget := int(float64(budget) * retainFraction)
 	overflow := len(msgs)
 	tokens := 0
 	for i := len(msgs) - 1; i >= 0; i-- {
 		tokens += openagent.CountMessageTokens(openagent.TokenizerModelID(rt.runModel), msgs[i])
-		if tokens > budget {
+		if tokens > retainTarget {
 			overflow = i + 1
 			break
 		}
@@ -198,15 +213,14 @@ func (rt *Runtime) prepareMemory(ctx context.Context, session openagent.Session,
 						ci.count = cc.ThroughIndex - oldTI
 						ci.from = oldTI
 						ci.to = cc.ThroughIndex
-						// freedTokens mirrors CompressAll's accounting so the
-						// ACP "Compacted N messages → summary (freed ~K tokens)"
-						// thought is consistent with the /compact slash echo:
-						// tokens the newly-compressed messages occupied, minus
-						// the tokens the summary now occupies. msgs[overflow:]
-						// is exactly the post-summary working set retained in
-						// the prompt (the head was just folded into cc).
+						// freedTokens = tokens freed by compaction: the
+						// compressed messages (msgs[:overflow]) minus the
+						// summary that replaces them. This mirrors
+						// CompressAll's accounting so the ACP "Compacted N
+						// messages → summary (freed ~K tokens)" thought is
+						// consistent with the /compact slash echo.
 						modelID := openagent.TokenizerModelID(rt.runModel)
-						freed := openagent.CountMessages(modelID, msgs[overflow:])
+						freed := openagent.CountMessages(modelID, msgs[:overflow])
 						freed -= openagent.CountMessageTokens(modelID, openagent.Message{
 							Role:    openagent.RoleSystem,
 							Content: cc.Summary,

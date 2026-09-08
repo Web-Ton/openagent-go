@@ -42,6 +42,17 @@ type Agent struct {
 	MaxWorkingTokens    int // max tokens for working set before compaction; 0 = 70% of model context window
 	MaxCompressedTokens int // max tokens for compressed summary, 0 = no limit (default 8192)
 
+	// CompactRatio is the fraction of the working-set budget to COMPRESS away
+	// when auto-compaction triggers (0–1). 0.8 (default) means: when the
+	// working set exceeds the budget, compress 80% of it into the summary and
+	// keep only the most recent 20%. This leaves a large headroom so the next
+	// several turns (tool results, model replies) fit without re-triggering
+	// compaction every turn — the "compress just the overflow" strategy leaves
+	// the working set flush against the budget, so any new message trips it
+	// again (a positive-feedback loop where summary growth shrinks the budget
+	// faster than compaction frees it).
+	CompactRatio float64
+
 	// ReasoningEffort is passed through to the Model's ChatCompletionRequest
 	// for providers that support it (OpenAI o-series, Anthropic extended thinking).
 	// Empty string means use the model default.
@@ -82,6 +93,7 @@ func New(name string, opts ...Option) *Agent {
 		Name:                name,
 		MaxTurns:            500,
 		MaxCompressedTokens: 8192,
+		CompactRatio:        0.8,
 	}
 	for _, opt := range opts {
 		if opt != nil {
