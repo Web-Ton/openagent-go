@@ -170,6 +170,15 @@ type Model struct {
 	// ctrl+c within quitArmWindow quits (armQuit).
 	quitArmedAt time.Time
 
+	// replayBuf holds the history messages a session load streams in while
+	// replayBuffering is true. They are applied in one pass on
+	// sessionLoadedMsg so the transcript renders once, fully formed,
+	// instead of growing message by message. replaying stays true through
+	// the apply pass (the handlers' replay semantics — undated thought
+	// cards, timestamp stamping — key off it); only buffering flips off.
+	replayBuf       []tea.Msg
+	replayBuffering bool
+
 	// compacting is true while a /compact control round-trip is in flight.
 	// The agent's slash registry intercepts the text and compacts the
 	// history; the round-trip never enters the conversation store (nor the
@@ -795,6 +804,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // update applies a single message, returning the commands it produced. It is
 // the body of Update without the post-frame viewport sync.
 func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// History replay streams message by message; hold each one until the
+	// load completes. sessionLoadedMsg then applies the whole buffer in a
+	// single pass — the transcript appears at once instead of trickling in
+	// (one render per replayed message).
+	if m.replayBuffering {
+		switch msg.(type) {
+		case agentMessageMsg, agentThoughtMsg, userMessageMsg, toolCallMsg, planMsg:
+			m.replayBuf = append(m.replayBuf, msg)
+			return m, nil
+		}
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		return m.updateWindowSize(msg)
@@ -1325,10 +1345,14 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.panelIdx = 0
 		return m, nil
 	case sessionLoadedMsg:
+		buf := m.replayBuf
+		m.replayBuf = nil
 		m.loading = false
-		m.replaying = false
+		m.replayBuffering = false
 		m.pendingModelsPanel = false
 		if msg.err != nil {
+			m.applyReplayBuf(buf) // handlers still see replaying=true here
+			m.replaying = false
 			m.statusText = "Load session failed: " + msg.err.Error()
 			return m, nil
 		}
@@ -1341,6 +1365,8 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mode = msg.mode
 		}
 		m.statusText = ""
+		m.applyReplayBuf(buf)
+		m.replaying = false
 		m.needAutoScroll = true
 		m.viewportDirty = true
 		// A cold-start pick held pending (no session existed when the user
@@ -2229,6 +2255,7 @@ func (m *Model) execSelectedSession() (tea.Model, tea.Cmd) {
 	m.lastTurnSteps, m.sessionSteps = 0, 0
 	m.loading = true
 	m.replaying = true
+	m.replayBuffering = true
 	m.statusText = "Loading session..."
 	return m, m.loadSessionCmd(item.id, item.title)
 }
@@ -2258,6 +2285,15 @@ func (m *Model) loadSessionCmd(id, title string) tea.Cmd {
 			msg.mode = string(resp.Modes.CurrentModeID)
 		}
 		return msg
+	}
+}
+
+// applyReplayBuf runs the history messages buffered during a session load
+// through the normal handlers in arrival order — one pass, so all the
+// dirty-marking collapses into the single refeed the caller triggers after.
+func (m *Model) applyReplayBuf(buf []tea.Msg) {
+	for _, bm := range buf {
+		_, _ = m.update(bm) // pointer receiver: state mutates in place
 	}
 }
 

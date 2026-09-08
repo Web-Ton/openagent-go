@@ -4574,3 +4574,86 @@ func TestPermissionCustomInputEmptySubmit(t *testing.T) {
 	default:
 	}
 }
+
+// TestReplayBuffersUntilLoadCompletes pins the one-shot history load: while
+// replaying, streamed history messages are held (the transcript stays
+// empty); sessionLoadedMsg applies the whole buffer in arrival order and
+// marks the viewport dirty exactly once — the transcript appears fully
+// formed instead of trickling in message by message.
+func TestReplayBuffersUntilLoadCompletes(t *testing.T) {
+	m := newTestModel()
+	m.inChat = true
+	m.width, m.height = 120, 36
+	m.loading = true // session pick sets these before the load command fires
+	m.replaying = true
+	m.replayBuffering = true
+
+	m.Update(agentMessageMsg{text: "assistant one", createdAt: todayAt(10, 1)})
+	m.Update(toolCallMsg{id: "t1", title: "shell ls", status: toolDone, createdAt: todayAt(10, 2)})
+	m.Update(userMessageMsg{text: "second question", createdAt: todayAt(10, 3)})
+	m.Update(agentThoughtMsg{text: "thinking", createdAt: todayAt(10, 4)})
+
+	if len(m.replayBuf) != 4 {
+		t.Fatalf("replayBuf = %d items, want 4", len(m.replayBuf))
+	}
+	if len(m.messages) != 0 {
+		t.Fatalf("replayed messages must not land while buffering, got %d", len(m.messages))
+	}
+	if !m.loading {
+		t.Fatalf("loading indicator stays up during the replay")
+	}
+
+	upd, _ := m.Update(sessionLoadedMsg{sessionID: "s1", title: "T"})
+	m = upd.(*Model)
+	if len(m.replayBuf) != 0 {
+		t.Fatalf("buffer must be drained after the load")
+	}
+	if m.replaying || m.loading {
+		t.Fatalf("replay/loading flags must clear, got %v/%v", m.replaying, m.loading)
+	}
+	// The outer Update already consumed the single dirty mark (one refeed);
+	// syncViewport mirrors it so the whole transcript is inspectable.
+	m.syncViewport()
+	doc := utils.StripANSI(m.renderVirtualDoc(30))
+	// The thought message renders as its collapsed "+ Thought" card header
+	// (content stays hidden unless thinking is expanded) — same as live.
+	for _, want := range []string{"assistant one", "shell ls", "second question", "+ Thought"} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("transcript missing %q after the one-pass load:\n%s", want, doc)
+		}
+	}
+	// Arrival order preserved: user, tool, assistant, thought interleaved as
+	// sent (assistant one → tool → user → thought).
+	roles := []string{}
+	for _, msg := range m.messages {
+		roles = append(roles, msg.Role)
+	}
+	want := []string{"assistant", "tool", "user", "thought"}
+	if len(roles) != len(want) {
+		t.Fatalf("messages = %v, want %v", roles, want)
+	}
+	for i := range want {
+		if roles[i] != want[i] {
+			t.Fatalf("message %d role = %q, want %q (all: %v)", i, roles[i], want[i], roles)
+		}
+	}
+}
+
+// TestReplayBufferAppliedOnLoadError keeps the legacy behavior on a failed
+// load: whatever streamed in before the error stays in the transcript.
+func TestReplayBufferAppliedOnLoadError(t *testing.T) {
+	m := newTestModel()
+	m.inChat = true
+	m.width, m.height = 120, 36
+	m.replaying = true
+	m.Update(userMessageMsg{text: "half loaded", createdAt: todayAt(10, 0)})
+
+	upd, _ := m.Update(sessionLoadedMsg{err: fmt.Errorf("boom")})
+	m = upd.(*Model)
+	if len(m.messages) != 1 || m.messages[0].Content != "half loaded" {
+		t.Fatalf("buffered messages must survive a failed load, got %+v", m.messages)
+	}
+	if m.replayBuf != nil {
+		t.Fatalf("buffer must drain on the error path too")
+	}
+}
