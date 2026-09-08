@@ -136,13 +136,15 @@ type Model struct {
 	// status line.
 	notifyMsg string
 
-	// Token usage (usage_update) and prompt count, shown in the right
-	// sidebar: usedTokens is the session's consumed context, contextSize
-	// the model's window, promptCount the prompts sent in the current
-	// session (live sends plus replayed history).
+	// Token usage (usage_update) shown in the right sidebar: usedTokens is
+	// the session's consumed context, contextSize the model's window.
 	usedTokens  int
 	contextSize int
 	promptCount int
+
+	// mcpServers is the session's MCP server list with connect outcomes
+	// (mcp_servers_update, full snapshot), rendered in the sidebar.
+	mcpServers []openacp.McpServerStatus
 
 	needAutoScroll bool
 
@@ -656,6 +658,10 @@ type contextCompactingMsg struct{ totalMessages int }
 // sessionInfoMsg — sessionUpdate "session_info_update": the server set or
 // renamed the session's title (generated after the first exchange).
 type sessionInfoMsg struct{ title string }
+
+// mcpServersMsg — sessionUpdate "mcp_servers_update": the session's MCP
+// servers with their connect outcome (sidebar section). Full snapshot.
+type mcpServersMsg struct{ servers []openacp.McpServerStatus }
 
 // retryingMsg — sessionUpdate "model_retrying": the model call hit a
 // transient error and the kernel backs off before the next attempt.
@@ -1173,6 +1179,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.title != "" {
 			m.sessionTitle = msg.title
 		}
+		return m, nil
+	case mcpServersMsg:
+		m.mcpServers = msg.servers
 		return m, nil
 	case contextCompactingMsg:
 		// History compaction started (auto, or manual /compact): open the

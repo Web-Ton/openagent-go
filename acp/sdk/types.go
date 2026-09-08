@@ -508,6 +508,19 @@ type McpServer struct {
 	Headers []HttpHeader   `json:"headers,omitempty"` // http / sse
 }
 
+// McpServerStatus is one row of the "mcp_servers_update" snapshot: a
+// session's configured MCP server with its connect outcome. Status is
+// "connected" or "failed" (failed connections are logged server-side and
+// never fatal — MCP is an optional enhancement). Tools counts the tools
+// imported from the server at connect time.
+type McpServerStatus struct {
+	Meta   map[string]any `json:"_meta,omitempty"`
+	Name   string         `json:"name"`
+	Type   string         `json:"type,omitempty"`  // ""=stdio, "http", "sse"
+	Status string         `json:"status"`          // "connected" | "failed"
+	Tools  int            `json:"tools,omitempty"` // imported tool count
+}
+
 // HttpHeader is a name-value pair for HTTP requests.
 type HttpHeader struct {
 	Meta  map[string]any `json:"_meta,omitempty"`
@@ -907,6 +920,9 @@ type SessionUpdate struct {
 	// usage_update token counters
 	Used *int `json:"used,omitempty"`
 	Size *int `json:"size,omitempty"`
+
+	// mcp_servers_update
+	McpServers []McpServerStatus `json:"mcpServers,omitempty"`
 
 	// session_info_update — per ACP spec the fields are flat inside the
 	// update object, not nested under a wrapper struct.

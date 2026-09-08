@@ -495,6 +495,10 @@ type EventHandler interface {
 	OnUsageUpdate(used, total int, cost *Cost)
 	// OnSessionInfo — sessionUpdate "session_info_update".
 	OnSessionInfo(title string, metadata map[string]any)
+	// OnMcpServers — sessionUpdate "mcp_servers_update": the session's
+	// MCP servers after connect (session create / load / resume). A full
+	// snapshot replace, not a delta.
+	OnMcpServers(servers []McpServerStatus)
 }
 
 // ── Reader goroutine ──
@@ -754,5 +758,7 @@ func (s *Session) dispatchSessionUpdate(params json.RawMessage) {
 			title = *u.Title
 		}
 		h.OnSessionInfo(title, u.Meta)
+	case "mcp_servers_update":
+		h.OnMcpServers(u.McpServers)
 	}
 }

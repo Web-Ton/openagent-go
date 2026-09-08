@@ -46,8 +46,8 @@ func TestConnectMCP_Gate(t *testing.T) {
 	// ── Disabled: no spawn, no file ──
 	fileOff := filepath.Join(t.TempDir(), "spawned-off")
 	srv.MCPEnabled = false
-	if sess, tools := srv.connectMCP(ctx, mkServers(fileOff)); sess != nil || tools != nil {
-		t.Errorf("disabled connectMCP = %v, %v; want nil, nil", sess, tools)
+	if sess, tools, statuses := srv.connectMCP(ctx, mkServers(fileOff)); sess != nil || tools != nil || statuses != nil {
+		t.Errorf("disabled connectMCP = %v, %v, %v; want nil, nil, nil", sess, tools, statuses)
 	}
 	if _, err := os.Stat(fileOff); err == nil {
 		t.Error("connectMCP spawned a process despite MCPEnabled=false")

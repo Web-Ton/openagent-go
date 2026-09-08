@@ -976,30 +976,41 @@ func (s *AgentServer) loadTotalTokens(ctx context.Context, sessionID string) int
 // Tools are listed once at connect time and cached — the connection is
 // long-lived (one connection per session lifetime).
 // Failed connections are logged but not fatal — MCP is an optional enhancement.
-func (s *AgentServer) connectMCP(ctx context.Context, servers []openacp.McpServer) ([]*mcp.Session, []openagent.Tool) {
+// connectMCP connects to all configured MCP servers and returns the
+// sessions plus a per-server status snapshot for the frontend (sent as the
+// "mcp_servers_update" session update). Tools are listed once at connect
+// time and cached — the connection is long-lived (one connection per
+// session lifetime).
+// Failed connections are logged but not fatal — MCP is an optional enhancement.
+func (s *AgentServer) connectMCP(ctx context.Context, servers []openacp.McpServer) ([]*mcp.Session, []openagent.Tool, []openacp.McpServerStatus) {
 	if !s.MCPEnabled {
-		return nil, nil
+		return nil, nil, nil
 	}
 	servers = s.mergeMcpServers(servers)
 	client := mcp.NewClient(s.AgentName, s.AgentVersion)
 	var sessions []*mcp.Session
 	var tools []openagent.Tool
+	var statuses []openacp.McpServerStatus
 	seen := make(map[string]string) // tool name → server (duplicate detection)
 	for _, cfg := range servers {
+		st := openacp.McpServerStatus{Name: cfg.Name, Type: cfg.Type, Status: "failed"}
 		sess, err := s.connectOneMCP(ctx, client, cfg)
 		if err != nil {
 			mcpWarn("connect", cfg.Name, err)
+			statuses = append(statuses, st)
 			continue
 		}
 		sessions = append(sessions, sess)
+		statuses = append(statuses, openacp.McpServerStatus{Name: cfg.Name, Type: cfg.Type, Status: "connected"})
 		// Name the session so tools are "mcp__<server>__<tool>" — unique
 		// across servers and self-describing to the model.
-		st, err := sess.Named(cfg.Name).Tools(ctx)
+		st2, err := sess.Named(cfg.Name).Tools(ctx)
 		if err != nil {
 			mcpWarn("list tools", cfg.Name, err)
 			continue
 		}
-		for _, t := range st {
+		statuses[len(statuses)-1].Tools = len(st2)
+		for _, t := range st2 {
 			name := t.Definition().Name
 			if owner, dup := seen[name]; dup {
 				// Two servers exposing the same tool name would make
@@ -1011,7 +1022,20 @@ func (s *AgentServer) connectMCP(ctx context.Context, servers []openacp.McpServe
 			tools = append(tools, t)
 		}
 	}
-	return sessions, tools
+	return sessions, tools, statuses
+}
+
+// sendMcpServersUpdate pushes the connect-time MCP snapshot to the client
+// (sidebar rendering). Sent on session create, load and resume; a nil
+// sender (stdout-free transports) skips silently.
+func (s *AgentServer) sendMcpServersUpdate(sid openacp.SessionId, statuses []openacp.McpServerStatus) {
+	if s.updateSender == nil {
+		return
+	}
+	s.updateSender.SendSessionUpdate(sid, openacp.SessionUpdate{
+		SessionUpdate: "mcp_servers_update",
+		McpServers:    statuses,
+	})
 }
 
 func (s *AgentServer) connectOneMCP(ctx context.Context, client *mcp.Client, cfg openacp.McpServer) (*mcp.Session, error) {
@@ -1175,7 +1199,7 @@ func (s *AgentServer) resolveSessionCwd(ctx context.Context, sessionID, reqCwd s
 
 func (s *AgentServer) OnNewSession(ctx context.Context, req openacp.NewSessionRequest) (*openacp.NewSessionResponse, error) {
 	id := s.newSessionID()
-	mcpSessions, mcpTools := s.connectMCP(ctx, req.McpServers)
+	mcpSessions, mcpTools, mcpStatuses := s.connectMCP(ctx, req.McpServers)
 	cwd := utils.NormalizePath(req.Cwd)
 	ss := &agentSession{
 		id:                    id,
@@ -1213,6 +1237,7 @@ func (s *AgentServer) OnNewSession(ctx context.Context, req openacp.NewSessionRe
 			AvailableSkills: s.availableSkills(ss),
 		})
 	}
+	s.sendMcpServersUpdate(id, mcpStatuses)
 
 	return &openacp.NewSessionResponse{
 		Meta:          map[string]any{"created_at": time.Now().UTC().Format(time.RFC3339Nano)},
@@ -1245,7 +1270,9 @@ func (s *AgentServer) OnLoadSession(ctx context.Context, req openacp.LoadSession
 			mcpServers:            req.McpServers,
 		}
 		// Reconnect MCP servers and inject tools for this session.
-		ss.mcpSessions, ss.mcpTools = s.connectMCP(ctx, req.McpServers)
+		var mcpStatuses []openacp.McpServerStatus
+		ss.mcpSessions, ss.mcpTools, mcpStatuses = s.connectMCP(ctx, req.McpServers)
+		s.sendMcpServersUpdate(req.SessionID, mcpStatuses)
 
 		// Create per-session process manager for long-running shell commands.
 		if cwd != "" {
@@ -1421,7 +1448,9 @@ func (s *AgentServer) OnResumeSession(ctx context.Context, req openacp.ResumeSes
 			mcpServers:            req.McpServers,
 		}
 		// Reconnect MCP servers and inject tools for this session.
-		ss.mcpSessions, ss.mcpTools = s.connectMCP(ctx, req.McpServers)
+		var mcpStatuses []openacp.McpServerStatus
+		ss.mcpSessions, ss.mcpTools, mcpStatuses = s.connectMCP(ctx, req.McpServers)
+		s.sendMcpServersUpdate(req.SessionID, mcpStatuses)
 
 		// Create per-session process manager for shell tool background processes.
 		if cwd != "" {

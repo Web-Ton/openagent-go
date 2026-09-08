@@ -446,19 +446,33 @@ func (m *Model) renderRight() string {
 		contextLines = append(contextLines,
 			background.Width(width-1).Foreground(theme.TextAsh).Render(pct))
 	}
-	turnsTitle := background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("Turns")
-	turnsValue := background.Width(width - 1).Foreground(theme.TextAsh).Render(strconv.Itoa(m.promptCount))
-
-	// Session-cumulative kernel steps (model↔tool round trips), summed from
-	// the per-turn counts carried by prompt responses. Live turns only —
-	// replayed history carries no step counts, so the number restarts on
-	// session switch; hidden entirely until the first live turn lands.
-	var stepsLines []string
-	if m.sessionSteps > 0 {
-		stepsLines = []string{
-			background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("Steps"),
-			background.Width(width - 1).Foreground(theme.TextAsh).Render(strconv.Itoa(m.sessionSteps)),
-			"",
+	// MCP section: the session's configured servers with their connect
+	// outcome (mcp_servers_update). Failed servers keep their row in the
+	// mute color with a ✗ marker (the same glyph the transcript uses for
+	// failed tool calls) so a broken config is visible at a glance.
+	mcpLines := []string{
+		background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("MCP"),
+	}
+	if len(m.mcpServers) == 0 {
+		mcpLines = append(mcpLines,
+			background.Width(width-1).Foreground(theme.TextMute).Render("none"))
+	} else {
+		const maxMcpRows = 6
+		for i, s := range m.mcpServers {
+			if i == maxMcpRows {
+				mcpLines = append(mcpLines,
+					background.Width(width-1).Foreground(theme.TextMute).
+						Render(fmt.Sprintf("… %d more", len(m.mcpServers)-i)))
+				break
+			}
+			name := utils.TruncateByWidth(s.Name, width-6)
+			if s.Status != "connected" {
+				mcpLines = append(mcpLines,
+					background.Width(width-1).Foreground(theme.TextMute).Render(name+" ✗"))
+			} else {
+				mcpLines = append(mcpLines,
+					background.Width(width-1).Foreground(theme.TextAsh).Render(name))
+			}
 		}
 	}
 
@@ -467,8 +481,9 @@ func (m *Model) renderRight() string {
 		sessionTitle, sessionValue, "",
 	}
 	headerParts = append(headerParts, contextLines...)
-	headerParts = append(headerParts, "", turnsTitle, turnsValue, "")
-	headerParts = append(headerParts, stepsLines...)
+	headerParts = append(headerParts, "")
+	headerParts = append(headerParts, mcpLines...)
+	headerParts = append(headerParts, "")
 	headerParts = append(headerParts, todoContent)
 	header := lipgloss.JoinVertical(lipgloss.Left, headerParts...)
 

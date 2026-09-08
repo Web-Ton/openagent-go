@@ -144,9 +144,11 @@ func TestPromptCountTracked(t *testing.T) {
 	}
 }
 
-// TestSidebarShowsContextTurnsAndPlanProgress checks the right sidebar's
-// data section: context usage, turn count, and the plan progress title.
-func TestSidebarShowsContextTurnsAndPlanProgress(t *testing.T) {
+// TestSidebarShowsContextMcpAndPlanProgress checks the right sidebar's
+// data section: context usage, the MCP server list, and the plan progress
+// title. Turns and Steps were dropped from the sidebar (turn-scoped step
+// counts live on the transcript's turn-end row instead).
+func TestSidebarShowsContextMcpAndPlanProgress(t *testing.T) {
 	m := newTestModel()
 	m.width = 120
 	m.height = 36
@@ -154,15 +156,52 @@ func TestSidebarShowsContextTurnsAndPlanProgress(t *testing.T) {
 	m.usedTokens = 12300
 	m.contextSize = 1000000
 	m.promptCount = 7
+	m.mcpServers = []openacp.McpServerStatus{
+		{Name: "iac-server", Status: "connected", Tools: 12},
+		{Name: "broken", Status: "failed"},
+	}
 	m.planEntries = []openacp.PlanEntry{
 		{Content: "step one", Status: "completed"},
 		{Content: "step two", Status: "in_progress"},
 	}
 	right := utils.StripANSI(m.renderRight())
-	for _, want := range []string{"12,300 tokens", "1% used", "Turns", "7", "Plans 1/2", "[▶] step two"} {
+	for _, want := range []string{"12,300 tokens", "1% used", "MCP", "iac-server", "broken", "Plans 1/2", "[▶] step two"} {
 		if !strings.Contains(right, want) {
 			t.Errorf("sidebar missing %q:\n%s", want, right)
 		}
+	}
+	if strings.Contains(right, "Turns") || strings.Contains(right, "Steps") {
+		t.Errorf("sidebar must not show Turns/Steps sections:\n%s", right)
+	}
+}
+
+// TestSidebarMcpEmptyAndOverflow checks the MCP section's degenerate shapes:
+// no servers renders the muted "none" placeholder, and a long list caps at
+// maxMcpRows with a trailing "… N more" row.
+func TestSidebarMcpEmptyAndOverflow(t *testing.T) {
+	m := newTestModel()
+	m.width = 120
+	m.height = 36
+	right := utils.StripANSI(m.renderRight())
+	if !strings.Contains(right, "MCP") || !strings.Contains(right, "none") {
+		t.Fatalf("empty MCP section must render the none placeholder:\n%s", right)
+	}
+
+	m.mcpServers = make([]openacp.McpServerStatus, 0, 9)
+	for i := 0; i < 9; i++ {
+		m.mcpServers = append(m.mcpServers, openacp.McpServerStatus{
+			Name: fmt.Sprintf("server-%d", i), Status: "connected",
+		})
+	}
+	right = utils.StripANSI(m.renderRight())
+	if !strings.Contains(right, "server-5") {
+		t.Fatalf("first maxMcpRows servers must render:\n%s", right)
+	}
+	if strings.Contains(right, "server-6") {
+		t.Fatalf("servers past the cap must not render:\n%s", right)
+	}
+	if !strings.Contains(right, "… 3 more") {
+		t.Fatalf("overflow row missing:\n%s", right)
 	}
 }
 
@@ -1989,7 +2028,7 @@ func TestModePanelAppliesViaSetConfigOption(t *testing.T) {
 // TestTurnStepsOnMarkerAndSidebar pins the steps plumbing: the finished
 // prompt's kernel turn count (response _meta.turn_count) lands on the
 // turn-end marker ("N steps", alongside the retry segment) and accumulates
-// in the sidebar's session Steps counter.
+// in the session counter — which the sidebar no longer renders.
 func TestTurnStepsOnMarkerAndSidebar(t *testing.T) {
 	m := newTestModel()
 	m.width, m.height = 100, 40
@@ -2024,8 +2063,8 @@ func TestTurnStepsOnMarkerAndSidebar(t *testing.T) {
 		t.Errorf("steps = %d/%d, want last 3 / session 10", m.lastTurnSteps, m.sessionSteps)
 	}
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
-	if got := m.View().Content; !strings.Contains(got, "Steps") || !strings.Contains(got, "10") {
-		t.Errorf("sidebar must show the cumulative Steps counter:\n%s", got)
+	if got := m.View().Content; strings.Contains(got, "Steps") {
+		t.Errorf("sidebar must not show a Steps section:\n%s", got)
 	}
 
 	// An unknown count (aborted / older peer) accumulates nothing.
