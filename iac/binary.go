@@ -76,15 +76,19 @@ func Install(ctx context.Context, ver string, mirrors []string, destDir string) 
 		return "", fmt.Errorf("create install dir: %w", err)
 	}
 
-	// Empty version: skip cache + mirrors, go straight to hc-install latest.
+	// Empty version: check cache first, then fetch latest via hc-install.
 	if ver == "" {
+		binPath := filepath.Join(destDir, binaryName(""))
+		if info, err := os.Stat(binPath); err == nil && !info.IsDir() {
+			return binPath, nil
+		}
 		return installViaHCInstall(ctx, ver, destDir)
 	}
 
 	// Check if already installed.
 	binName := binaryName(ver)
 	binPath := filepath.Join(destDir, binName)
-	if _, err := os.Stat(binPath); err == nil {
+	if info, err := os.Stat(binPath); err == nil && !info.IsDir() {
 		return binPath, nil
 	}
 
@@ -129,7 +133,7 @@ func downloadFromMirror(ctx context.Context, mirror, ver, destDir string) (strin
 func installViaHCInstall(ctx context.Context, ver, destDir string) (string, error) {
 	i := install.NewInstaller()
 
-	var dir string
+	var binPath string
 	var err error
 
 	if ver == "" {
@@ -138,7 +142,7 @@ func installViaHCInstall(ctx context.Context, ver, destDir string) (string, erro
 			Product:    product.Terraform,
 			InstallDir: destDir,
 		}
-		dir, err = i.Ensure(ctx, []src.Source{lv})
+		binPath, err = i.Ensure(ctx, []src.Source{lv})
 		if err != nil {
 			return "", fmt.Errorf("hc-install latest: %w", err)
 		}
@@ -153,29 +157,30 @@ func installViaHCInstall(ctx context.Context, ver, destDir string) (string, erro
 			Version:    v,
 			InstallDir: destDir,
 		}
-		dir, err = i.Ensure(ctx, []src.Source{ev})
+		binPath, err = i.Ensure(ctx, []src.Source{ev})
 		if err != nil {
 			return "", fmt.Errorf("hc-install %s: %w", ver, err)
 		}
 	}
 
-	// hc-install names the binary "terraform"; rename to include version
-	// for our caching scheme.
-	srcPath := filepath.Join(dir, "terraform")
-	if runtime.GOOS == "windows" {
-		srcPath = filepath.Join(dir, "terraform.exe")
-	}
-
+	// hc-install's Ensure returns the full path to the installed executable
+	// (filepath.Join(destDir, Product.BinaryName())), not a directory.
+	// Product.BinaryName() is platform-aware — "terraform.exe" on Windows,
+	// "terraform" elsewhere — so no GOOS switch is needed here. The previous
+	// code treated the return value as a directory and re-joined "terraform"
+	// onto it, producing a double-nested path (destDir/terraform/terraform).
+	// For the "latest" case the binary is already at the right path; for a
+	// pinned version, rename it to include the version suffix for caching.
 	if ver == "" {
-		return srcPath, nil
+		return binPath, nil
 	}
 
 	dstPath := filepath.Join(destDir, binaryName(ver))
-	if err := os.Rename(srcPath, dstPath); err != nil {
-		if err := copyFile(srcPath, dstPath); err != nil {
+	if err := os.Rename(binPath, dstPath); err != nil {
+		if err := copyFile(binPath, dstPath); err != nil {
 			return "", fmt.Errorf("rename binary: %w", err)
 		}
-		os.Remove(srcPath)
+		os.Remove(binPath)
 	}
 	return dstPath, nil
 }

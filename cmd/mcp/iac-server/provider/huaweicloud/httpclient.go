@@ -77,6 +77,14 @@ func NewHTTPRequest(ak, sk, securityToken string) *HTTPRequest {
 					if err != nil {
 						host = addr
 					}
+					// HuaweiCloud API endpoints resolve to 100.125.x.x inside
+					// VPCs (RFC 6598 CGNAT), which ResolveAndCheck rejects.
+					// isHuaweiCloudHost already verified the domain at the
+					// Execute layer, so this bypass only applies to legitimate
+					// HuaweiCloud API domains — not attacker-controlled hosts.
+					if isHuaweiCloudInternal(host) {
+						return dialer.DialContext(ctx, network, addr)
+					}
 					if err := utils.ResolveAndCheck(host); err != nil {
 						return nil, err
 					}
@@ -146,8 +154,13 @@ func (t *HTTPRequest) Execute(ctx context.Context, args json.RawMessage) *openag
 
 	// Parse the URL into endpoint, path, and query for signing.
 	// (parsed already validated above; reuse it.)
-	if err := utils.ResolveAndCheck(parsed.Hostname()); err != nil {
-		return openagent.ErrorResult(fmt.Errorf("http_request: %w", err), false, "")
+	// Same HuaweiCloud internal bypass as DialContext — by this point
+	// isHuaweiCloudHost has confirmed the domain, so a 100.125.x.x resolve
+	// is a legitimate VPC-internal API endpoint, not an SSRF target.
+	if !isHuaweiCloudInternal(parsed.Hostname()) {
+		if err := utils.ResolveAndCheck(parsed.Hostname()); err != nil {
+			return openagent.ErrorResult(fmt.Errorf("http_request: %w", err), false, "")
+		}
 	}
 
 	// Query params for signing — pass url.Values directly so repeated keys
@@ -348,6 +361,33 @@ func isHuaweiCloudHost(host string) bool {
 	}
 	for _, sfx := range suffixes {
 		if strings.HasSuffix(host, sfx) {
+			return true
+		}
+	}
+	return false
+}
+
+// isHuaweiCloudInternal reports whether host resolves to a HuaweiCloud
+// VPC-internal address (100.125.0.0/16). Inside a VPC, HuaweiCloud API
+// endpoints (iam/ims/ecs/rms.{region}.myhuaweicloud.com) resolve to
+// 100.125.x.x — part of RFC 6598 CGNAT (100.64.0.0/10), which the generic
+// SSRF defense (utils.IsPublicIP) rejects. This bypass lets those legitimate
+// internal endpoints through.
+//
+// Security: this is only reached after isHuaweiCloudHost has verified the
+// domain is a real HuaweiCloud API endpoint (*.myhuaweicloud.com/.cn/.eu),
+// so an attacker-controlled URL never reaches this check.
+func isHuaweiCloudInternal(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(context.Background(), host)
+	if err != nil || len(ips) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		ip4 := ip.IP.To4()
+		if ip4 != nil && ip4[0] == 100 && ip4[1] == 125 {
 			return true
 		}
 	}

@@ -32,7 +32,7 @@ func (h *HuaweiCloud) agents() map[provider.PromptRole]provider.AgentConfig {
 - Do NOT generate .tf configuration
 
 ## Notes
-- Resource types are huaweicloud terraform resource types (e.g. huaweicloud_vpc, huaweicloud_compute_instance, huaweicloud_vpc_subnet, huaweicloud_vpc_eip, huaweicloud_rds_instance, huaweicloud_elb_loadbalancer)`,
+- Resource types are huaweicloud terraform resource types (e.g. huaweicloud_vpc, huaweicloud_vpc_subnet, huaweicloud_vpc_eip, huaweicloud_vpc_eip_associate, huaweicloud_networking_secgroup, huaweicloud_networking_secgroup_rule, huaweicloud_compute_instance, huaweicloud_compute_eip_associate, huaweicloud_rds_instance, huaweicloud_elb_loadbalancer, huaweicloud_dcs_instance, huaweicloud_cce_cluster, huaweicloud_obs_bucket, huaweicloud_cdn_domain)`,
 		},
 		provider.RoleSpecifier: {
 			SkillName: "huaweicloud-deploy",

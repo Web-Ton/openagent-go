@@ -381,7 +381,9 @@ or, when you need more input:
 	msg := openagent.UserMessage(userMsg)
 	var result *openagent.RunResult
 	for attempt := 0; attempt < 3; attempt++ {
+		stop := heartbeatProgress(progress, fmt.Sprintf("Determining resource specs (attempt %d/3)...", attempt+1), 1, 3)
 		result, err = rt.Run(ctx, session, msg)
+		stop()
 		if err != nil {
 			return "", fmt.Errorf("specify_resources: LLM run (attempt %d): %w", attempt+1, err)
 		}
@@ -566,7 +568,9 @@ Return JSON:
 	var reasoning string
 	for attempt := 0; attempt < 3; attempt++ {
 		progress(fmt.Sprintf("Generating .tf files (attempt %d/3)...", attempt+1), float64(attempt), 3)
+		stop := heartbeatProgress(progress, fmt.Sprintf("Generating .tf files (attempt %d/3)...", attempt+1), float64(attempt), 3)
 		result, err := rt.Run(ctx, session, msg)
+		stop()
 		if err != nil {
 			return "", fmt.Errorf("generate_terraform_plan: LLM run (attempt %d): %w", attempt+1, err)
 		}
@@ -582,7 +586,9 @@ Return JSON:
 			continue
 		}
 		if err := json.Unmarshal([]byte(raw), &llmOutput); err != nil {
-			return "", fmt.Errorf("generate_terraform_plan: parse (attempt %d): %w (raw=%q)", attempt+1, err, raw)
+			// JSON parse failure — retry with a nudge before giving up.
+			msg = nudgeMessage(fmt.Sprintf("Your previous response was not valid JSON: %s. Output the JSON result with .tf files as specified in the system prompt, without any markdown fences or extra text.", err))
+			continue
 		}
 
 		if len(llmOutput.Files) == 0 {
@@ -816,7 +822,9 @@ Return JSON:
 
 	session := openagent.Session{ID: sessionID(deploymentID)}
 	progress("Querying cloud pricing...", 1, 3)
+	stop := heartbeatProgress(progress, "Querying cloud pricing...", 1, 3)
 	result, err := rt.Run(ctx, session, openagent.UserMessage(userMsg))
+	stop()
 	if err != nil {
 		return "", fmt.Errorf("estimate_cost: LLM run: %w", err)
 	}
@@ -1081,8 +1089,14 @@ func readTFFiles(dir string) (string, error) {
 	return b.String(), nil
 }
 
-// extractJSON finds the first JSON object in a string (LLM output may have
-// surrounding text or markdown fences).
+// extractJSON finds the first balanced JSON object in a string (LLM output
+// may have surrounding text or markdown fences).
+//
+// It uses brace-depth counting instead of LastIndex("}") to find the true
+// end of the JSON object. This handles the case where the LLM appends extra
+// text after the closing fence — e.g. ```json\n{...}\n```\n} — where
+// LastIndex("}") would match the trailing "}" and leave the fence inside
+// the extracted substring, causing json.Unmarshal to fail.
 func extractJSON(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, "```json")
@@ -1090,12 +1104,43 @@ func extractJSON(s string) string {
 	s = strings.TrimSuffix(s, "```")
 	s = strings.TrimSpace(s)
 
-	start := strings.Index(s, "{")
-	end := strings.LastIndex(s, "}")
-	if start == -1 || end == -1 || end <= start {
+	start := strings.IndexByte(s, '{')
+	if start == -1 {
 		return s
 	}
-	return s[start : end+1]
+
+	// Walk from start, counting brace depth. Skip strings to avoid
+	// counting braces inside JSON string values.
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' && inString {
+			escaped = true
+			continue
+		}
+		if c == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		if c == '{' {
+			depth++
+		} else if c == '}' {
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	return s // unbalanced — return whole string so Unmarshal gives a clear error
 }
 
 // hasJSONObject reports whether s contains an extractable JSON object.
@@ -1105,6 +1150,38 @@ func extractJSON(s string) string {
 func hasJSONObject(s string) bool {
 	extracted := extractJSON(s)
 	return strings.HasPrefix(extracted, "{") && strings.HasSuffix(extracted, "}")
+}
+
+// heartbeatProgress periodically updates the progress message with elapsed
+// time while a long-running LLM call is in progress. It returns a stop
+// function that must be called when the LLM call completes. The caller's
+// progress cur/tot are preserved — only the message is enriched with a
+// running elapsed counter so the client can tell the task is alive.
+//
+// Usage:
+//
+//	stop := heartbeatProgress(progress, "Determining resource specs...", 1, 3)
+//	result, err := rt.Run(ctx, session, msg)
+//	stop()
+func heartbeatProgress(progress openagent.ProgressFunc, msg string, cur, tot float64) func() {
+	start := time.Now()
+	ticker := time.NewTicker(10 * time.Second)
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-done:
+				ticker.Stop()
+				return
+			case <-ticker.C:
+				progress(fmt.Sprintf("%s (%ds elapsed)", msg, int(time.Since(start).Seconds())), cur, tot)
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		progress(msg, cur, tot) // final update without elapsed
+	}
 }
 
 // nudgeMessage returns a transient user message that prompts the LLM to retry
