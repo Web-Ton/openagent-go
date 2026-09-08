@@ -130,8 +130,14 @@ func (m *Model) renderLeft(geom *viewGeom) string {
 		sb := m.renderScrollbar(vpHeight)
 		scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.chatViewport.View(), m.renderScrollbarGap(vpHeight), sb)
 		status := m.renderStatus()
+		// Blank separator between the transcript and the panel — the
+		// viewportHeight budget reserves one row for it (mirroring the
+		// normal path's gap above the input box). Without it the last
+		// transcript row sits flush against the panel, and a queued user
+		// card (same blue rail, same surface) reads as an uncovered input
+		// box sliver.
 		return theme.BaseStyle().Width(leftW).Padding(0, 1).Render(
-			lipgloss.JoinVertical(lipgloss.Left, scrollContainer, inputArea, status),
+			lipgloss.JoinVertical(lipgloss.Left, scrollContainer, "", inputArea, status),
 		)
 	}
 
