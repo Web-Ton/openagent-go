@@ -52,6 +52,9 @@ func TestTUPreview(t *testing.T) {
 			ToolCallID: "tc-perm", TurnId: 2, CreatedAt: todayAt(14, 28)},
 	)
 	m.inChat = true
+	// The sidebar prefers the session's human title over the raw id.
+	m.activeSessionID = "acp_1788831515590962986_1"
+	m.sessionTitle = "PPT 渲染链路调研"
 	// Sidebar context numbers mirror the style reference: 16,110 tokens,
 	// 2% used of a 1M window.
 	m.usedTokens = 16110

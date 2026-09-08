@@ -287,26 +287,43 @@ func TestPanelCtrlPOpenAndFilter(t *testing.T) {
 	if !m.panelOpen {
 		t.Fatal("ctrl+p should open the panel")
 	}
-	for _, r := range "thin" {
+	for _, r := range "search" {
 		m.Update(tea.KeyPressMsg{Code: r})
 	}
 	cmds := m.buildPanelCommands()
-	if len(cmds) != 1 || cmds[0].slash != "/toggle_thinking" {
-		t.Fatalf("filter 'thin' should leave one command, got %+v", cmds)
+	if len(cmds) != 1 || cmds[0].slash != "/search" {
+		t.Fatalf("filter 'search' should leave one command, got %+v", cmds)
 	}
 }
 
-func TestPanelExecuteTogglesAndCloses(t *testing.T) {
+// TestPanelHidesToggleFamily guards the /toggle_* commands staying out of
+// the command panel: neither the Ctrl+P palette nor the "/" sheet lists
+// them, but they stay registered so typed input still runs them.
+func TestPanelHidesToggleFamily(t *testing.T) {
+	m := newTestModel()
+	for _, pc := range m.buildPanelCommands() {
+		if strings.HasPrefix(pc.slash, "/toggle_") {
+			t.Errorf("toggle command %s must not appear in the command panel", pc.slash)
+		}
+	}
+	if !registeredSlash("/toggle_thinking") {
+		t.Error("/toggle_thinking must stay registered for typed input")
+	}
+}
+
+func TestPanelExecuteClosesAndRuns(t *testing.T) {
+	t.Cleanup(theme.Reset) // /theme applies a global palette
 	m := newTestModel()
 	m.panelOpen = true
-	m.panelFilter = "thin"
+	m.panelFilter = "theme"
 	m.panelIdx = 0
+	pre := m.themeIdx
 	m2, _ := enterKey(m)
 	if m2.panelOpen {
 		t.Error("panel should close after executing a command")
 	}
-	if !m2.visibleConfig.ExpandThinking {
-		t.Error("panel selection should expand thinking (default collapsed)")
+	if m2.themeIdx != (pre+1)%len(themePresets) {
+		t.Error("panel selection should run the selected command (/theme)")
 	}
 }
 
@@ -698,7 +715,7 @@ func TestPanelRenderRowsConsistent(t *testing.T) {
 
 	lines := strings.Split(utils.StripANSI(rendered), "\n")
 	// title + blank + rows + blank + footer; no top/bottom frame lines.
-	wantLines := len(allPanelCommands()) + 4
+	wantLines := len(m.buildPanelCommands()) + 4
 	if got := len(lines); got != wantLines {
 		t.Fatalf("panel has %d lines, want %d — row wrapping detected", got, wantLines)
 	}
@@ -1206,6 +1223,34 @@ func TestThoughtStreamingCollapsesOnClose(t *testing.T) {
 	}
 	if !strings.Contains(plain, "+ Thought") {
 		t.Errorf("closed thought should carry the header:\n%s", plain)
+	}
+}
+
+// TestSidebarShowsSessionTitle pins the Session section's label source: the
+// raw id until the server pushes a title (session_info_update), then the
+// title; switching sessions carries the picker item's title.
+func TestSidebarShowsSessionTitle(t *testing.T) {
+	m := newTestModel()
+	m.inChat = true
+	m.activeSessionID = "acp_1788831515590962986_1"
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	if got := m.View().Content; !strings.Contains(got, "acp_1788831515590962986_1") {
+		t.Errorf("sidebar must fall back to the session id:\n%s", got)
+	}
+
+	m.Update(sessionInfoMsg{title: "PPT 渲染链路调研"})
+	if got := m.View().Content; !strings.Contains(got, "PPT 渲染链路调研") || strings.Contains(got, "acp_1788831515590962986") {
+		t.Errorf("sidebar must prefer the pushed title over the id:\n%s", got)
+	}
+
+	m.Update(sessionLoadedMsg{sessionID: "acp_other", title: "切换来的会话"})
+	if m.sessionTitle != "切换来的会话" {
+		t.Errorf("session switch must carry the picker title, got %q", m.sessionTitle)
+	}
+
+	m.Update(sessionInfoMsg{title: ""})
+	if m.sessionTitle != "切换来的会话" {
+		t.Error("an empty title push must not clear a known title")
 	}
 }
 
@@ -1774,7 +1819,9 @@ func toggleThoughtLevel(t *testing.T, m *Model) *Model {
 
 func toggleSlash(t *testing.T, m *Model, slash string) *Model {
 	t.Helper()
-	for _, pc := range m.buildPanelCommands() {
+	// The full registry, not the panel list: /toggle_mode is kept out of the
+	// panel but the command itself stays runnable.
+	for _, pc := range allPanelCommands() {
 		if pc.slash == slash {
 			m2, _ := m.executeCommand(pc)
 			return m2.(*Model)
@@ -2046,15 +2093,18 @@ func TestSessionPanelShowsUpdatedAt(t *testing.T) {
 
 func TestBackendDependentCommandsDisabledWithoutSession(t *testing.T) {
 	m := newTestModel()
-	for _, pc := range m.buildPanelCommands() {
+	// Iterate the full registry: the /toggle_* family is hidden from the
+	// panel but must still be classified correctly for typed input.
+	for _, pc := range allPanelCommands() {
+		enabled := m.commandEnabled(pc)
 		switch pc.action {
 		case actionSessions, actionModels, actionNew, actionUpdateSkills:
-			if pc.enabled {
+			if enabled {
 				t.Errorf("%s should be disabled without a backend", pc.slash)
 			}
 		case actionToggleMode, actionToggleThinking, actionToggleSkill,
 			actionToggleShell, actionToggleToolDetail, actionExit:
-			if !pc.enabled {
+			if !enabled {
 				t.Errorf("%s should always be enabled", pc.slash)
 			}
 		}
@@ -2111,6 +2161,7 @@ func TestSlashDoesNotTriggerMidInput(t *testing.T) {
 // typing there (the sheet never echoes them), and Enter runs the selected
 // command and clears the box.
 func TestSlashSheetTypesIntoInput(t *testing.T) {
+	t.Cleanup(theme.Reset) // the /theme run applies a global palette
 	m := newTestModel()
 	m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
 	if !m.panelOpen || !m.panelFromSlash {
@@ -2121,19 +2172,21 @@ func TestSlashSheetTypesIntoInput(t *testing.T) {
 	}
 	m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
 	m.Update(tea.KeyPressMsg{Code: 'h', Text: "h"})
-	m.Update(tea.KeyPressMsg{Code: 'i', Text: "i"})
-	m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
-	if got := m.chatTextarea.Value(); got != "/thin" {
-		t.Fatalf("input box = %q, want %q (typing must stay in the box)", got, "/thin")
+	m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
+	m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
+	if got := m.chatTextarea.Value(); got != "/theme" {
+		t.Fatalf("input box = %q, want %q (typing must stay in the box)", got, "/theme")
 	}
-	if m.panelFilter != "thin" {
-		t.Errorf("filter = %q, want %q (derived from the box)", m.panelFilter, "thin")
+	if m.panelFilter != "theme" {
+		t.Errorf("filter = %q, want %q (derived from the box)", m.panelFilter, "theme")
 	}
 	cmds := m.buildPanelCommands()
-	if len(cmds) != 1 || cmds[0].slash != "/toggle_thinking" {
-		t.Fatalf("filter /thin should leave /toggle_thinking, got %+v", cmds)
+	if len(cmds) != 1 || cmds[0].slash != "/theme" {
+		t.Fatalf("filter /theme should leave /theme, got %+v", cmds)
 	}
 
+	pre := m.themeIdx
 	m2, _ := enterKey(m)
 	mm := m2
 	if mm.panelOpen {
@@ -2145,7 +2198,38 @@ func TestSlashSheetTypesIntoInput(t *testing.T) {
 	if mm.panelFilter != "" {
 		t.Errorf("filter = %q, want empty after execution", mm.panelFilter)
 	}
-	if !mm.visibleConfig.ExpandThinking {
+	if mm.themeIdx != (pre+1)%len(themePresets) {
+		t.Error("enter should have run /theme (cycled)")
+	}
+}
+
+// TestSlashSheetRunsHiddenToggle verifies the /toggle_* family stays
+// typed-runnable even though it is kept out of the command panel: the sheet
+// shows it as a no-match, but Enter falls back to the registry when the
+// typed text names a registered command exactly.
+func TestSlashSheetRunsHiddenToggle(t *testing.T) {
+	m := newTestModel()
+	m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	for _, r := range "toggle_thinking" {
+		m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	if cmds := m.buildPanelCommands(); len(cmds) != 0 {
+		t.Fatalf("hidden toggle must not appear in the sheet, got %+v", cmds)
+	}
+	if got := m.chatTextarea.Value(); got != "/toggle_thinking" {
+		t.Fatalf("input box = %q, want %q", got, "/toggle_thinking")
+	}
+	m2, _ := enterKey(m)
+	if m2.panelOpen {
+		t.Error("enter should close the sheet")
+	}
+	if got := m2.chatTextarea.Value(); got != "" {
+		t.Errorf("enter should clear the input, got %q", got)
+	}
+	if m2.panelFilter != "" {
+		t.Errorf("filter = %q, want empty after execution", m2.panelFilter)
+	}
+	if !m2.visibleConfig.ExpandThinking {
 		t.Error("enter should have run /toggle_thinking (expanded)")
 	}
 }
@@ -2197,6 +2281,27 @@ func TestSlashSheetEnterNoMatchKeepsSheet(t *testing.T) {
 	}
 	if got := mm.chatTextarea.Value(); got != "/zz" {
 		t.Errorf("input box = %q, want %q (kept for editing)", got, "/zz")
+	}
+}
+
+// TestSlashSheetEnterPartialToggleKeepsSheet: a partial toggle name is not a
+// command, so Enter must not run anything — the sheet stays open and the
+// draft stays editable (the registry fallback only fires on an exact match).
+func TestSlashSheetEnterPartialToggleKeepsSheet(t *testing.T) {
+	m := newTestModel()
+	m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	for _, r := range "toggle" {
+		m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	m2, _ := enterKey(m)
+	if !m2.panelOpen {
+		t.Error("enter on a partial toggle name should keep the sheet open")
+	}
+	if got := m2.chatTextarea.Value(); got != "/toggle" {
+		t.Errorf("input box = %q, want %q (kept for editing)", got, "/toggle")
+	}
+	if m2.visibleConfig.ExpandThinking {
+		t.Error("partial /toggle must not fire any toggle")
 	}
 }
 
@@ -3832,9 +3937,11 @@ func TestSlashSheetWindowAndSelection(t *testing.T) {
 	m := newTestModel()
 	m.panelOpen = true
 	m.panelFromSlash = true
-	// 18 commands exist, but the sheet shows at most maxSheetRows; the
-	// window slides so the selection stays visible.
-	m.panelIdx = len(allPanelCommands()) - 1
+	// 12 commands are listed in the sheet (the /toggle_* family is hidden),
+	// but the sheet shows at most maxSheetRows; the window slides so the
+	// selection stays visible.
+	cmds := m.buildPanelCommands()
+	m.panelIdx = len(cmds) - 1
 	slash := utils.StripANSI(m.renderSlashPanel())
 	rows := 0
 	for _, ln := range strings.Split(slash, "\n") {
@@ -3845,7 +3952,7 @@ func TestSlashSheetWindowAndSelection(t *testing.T) {
 	if rows != maxSheetRows {
 		t.Errorf("windowed sheet shows %d rows, want %d:\n%s", rows, maxSheetRows, slash)
 	}
-	last := allPanelCommands()[len(allPanelCommands())-1].slash
+	last := cmds[len(cmds)-1].slash
 	if !strings.Contains(slash, last) {
 		t.Errorf("selected (last) command %q must be visible in the window:\n%s", last, slash)
 	}

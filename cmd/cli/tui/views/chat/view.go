@@ -426,7 +426,14 @@ func (m *Model) renderRight() string {
 	rightStyle := background.Width(width).Height(m.height).PaddingLeft(1)
 
 	sessionTitle := background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("Session")
-	sessionValue := background.Width(width - 1).Foreground(theme.TextAsh).Render(m.activeSessionID)
+	// Prefer the session's human title (server-generated, pushed via
+	// session_info_update); the raw id is the fallback until one arrives.
+	sessionLabel := m.activeSessionID
+	if m.sessionTitle != "" {
+		sessionLabel = m.sessionTitle
+	}
+	sessionValue := background.Width(width - 1).Foreground(theme.TextAsh).
+		Render(utils.TruncateByWidth(sessionLabel, width-2))
 
 	contextTitle := background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("Context")
 	contextLines := []string{

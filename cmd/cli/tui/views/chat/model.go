@@ -63,6 +63,12 @@ type Model struct {
 
 	activeSessionID string
 
+	// sessionTitle is the active session's human title (server-generated
+	// after the first exchange, pushed via session_info_update; also carried
+	// from the /sessions picker on switch). Empty until known — the sidebar
+	// falls back to the raw session id.
+	sessionTitle string
+
 	// inChat controls welcome vs chat view. Set true on first Enter so the
 	// view switches immediately without waiting for the ACP session ID.
 	inChat bool
@@ -330,34 +336,48 @@ type panelCommand struct {
 	action  cmdAction
 	enabled bool
 	space   bool // toggles with the space key when the filter is empty
+	panel   bool // listed in the command panel; false keeps it typed-only
 }
 
 // allPanelCommands is the static command registry. Commands whose
 // functionality has not landed yet stay out of the list entirely (parked:
 // /update_skills is still the "not implemented" stub, /plugins only listed
 // a directory nothing consumes) — re-enable by adding a line here; the
-// executeCommand handlers are kept.
+// executeCommand handlers are kept. The /toggle_* family is registered but
+// deliberately kept out of the command panel (panel: false): the visibility
+// toggles stay typed-runnable without cluttering the picker.
 func allPanelCommands() []panelCommand {
 	return []panelCommand{
-		{"/sessions", "Switch session", actionSessions, true, false},
-		{"/new", "New session", actionNew, true, false},
-		{"/models", "Switch model", actionModels, true, false},
-		{"/toggle_mode", "Switch mode", actionToggleMode, true, false},
-		{"/thought_level", "Switch thought level", actionThoughtLevel, true, false},
-		{"/compact", "Compact session context", actionCompact, true, false},
-		{"/toggle_thinking", "Expand thinking content", actionToggleThinking, true, true},
-		{"/toggle_skill", "Toggle skill tools", actionToggleSkill, true, true},
-		{"/toggle_shell", "Toggle shell tools", actionToggleShell, true, true},
-		{"/toggle_toolcall", "Toggle tool call detail", actionToggleToolDetail, true, true},
-		{"/toggle_linenumbers", "Toggle input line numbers", actionToggleLineNumbers, true, true},
-		{"/help", "Show help", actionHelp, true, false},
-		{"/search", "Search transcript", actionSearch, true, false},
-		{"/export", "Export transcript to Markdown", actionExport, true, false},
-		{"/edit", "Edit a past user message", actionEdit, true, false},
-		{"/theme", "Cycle color theme", actionTheme, true, true},
-		{"/split", "Toggle split view", actionSplit, true, false},
-		{"/exit", "Exit the app", actionExit, true, false},
+		{"/sessions", "Switch session", actionSessions, true, false, true},
+		{"/new", "New session", actionNew, true, false, true},
+		{"/models", "Switch model", actionModels, true, false, true},
+		{"/toggle_mode", "Switch mode", actionToggleMode, true, false, false},
+		{"/thought_level", "Switch thought level", actionThoughtLevel, true, false, true},
+		{"/compact", "Compact session context", actionCompact, true, false, true},
+		{"/toggle_thinking", "Expand thinking content", actionToggleThinking, true, true, false},
+		{"/toggle_skill", "Toggle skill tools", actionToggleSkill, true, true, false},
+		{"/toggle_shell", "Toggle shell tools", actionToggleShell, true, true, false},
+		{"/toggle_toolcall", "Toggle tool call detail", actionToggleToolDetail, true, true, false},
+		{"/toggle_linenumbers", "Toggle input line numbers", actionToggleLineNumbers, true, true, false},
+		{"/help", "Show help", actionHelp, true, false, true},
+		{"/search", "Search transcript", actionSearch, true, false, true},
+		{"/export", "Export transcript to Markdown", actionExport, true, false, true},
+		{"/edit", "Edit a past user message", actionEdit, true, false, true},
+		{"/theme", "Cycle color theme", actionTheme, true, true, true},
+		{"/split", "Toggle split view", actionSplit, true, false, true},
+		{"/exit", "Exit the app", actionExit, true, false, true},
 	}
+}
+
+// registeredSlash reports whether slash names a registered command, even one
+// kept out of the command panel (the /toggle_* family stays typed-runnable).
+func registeredSlash(slash string) bool {
+	for _, pc := range allPanelCommands() {
+		if pc.slash == slash {
+			return true
+		}
+	}
+	return false
 }
 
 // toggleIcon reports the ○/● state for a toggle command.
@@ -597,6 +617,10 @@ type agentThoughtMsg struct {
 }
 type contextCompactingMsg struct{ totalMessages int }
 
+// sessionInfoMsg — sessionUpdate "session_info_update": the server set or
+// renamed the session's title (generated after the first exchange).
+type sessionInfoMsg struct{ title string }
+
 // retryingMsg — sessionUpdate "agent_retrying": the model call hit a
 // transient error and the kernel backs off before the next attempt.
 // Turn-scoped transient state: never stored, never replayed.
@@ -643,6 +667,7 @@ type loadSessionsMsg struct {
 }
 type sessionLoadedMsg struct {
 	sessionID     string
+	title         string // from the /sessions picker item; empty on other paths
 	configOptions []openacp.SessionConfigOption
 	mode          string
 	err           error
@@ -991,6 +1016,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ── ACP streaming events ──
 	case acpReadyMsg:
 		m.activeSessionID = msg.sessionID
+		m.sessionTitle = ""
 		if msg.configOptions != nil {
 			m.configOptions = msg.configOptions
 			// Adopt the mode option so the header badge matches the server's
@@ -1081,6 +1107,12 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.usedTokens = msg.used
 		}
 		return m, nil
+	case sessionInfoMsg:
+		// Sidebar shows the session's human title once the server sets one.
+		if msg.title != "" {
+			m.sessionTitle = msg.title
+		}
+		return m, nil
 	case contextCompactingMsg:
 		// History compaction started (auto, or manual /compact): open the
 		// two-state compact block. Idempotent — a round-trip emits the
@@ -1121,6 +1153,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.activeSessionID = msg.sessionID
+		m.sessionTitle = "" // fresh session: title arrives via session_info_update
 		if msg.configOptions != nil {
 			m.configOptions = msg.configOptions
 		}
@@ -1204,6 +1237,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.activeSessionID = msg.sessionID
+		m.sessionTitle = msg.title
 		if msg.configOptions != nil {
 			m.configOptions = msg.configOptions
 		}
@@ -1389,10 +1423,15 @@ func (m *Model) cancelPrompt() {
 // ── slash commands & command panel ──
 
 // buildPanelCommands returns the filtered command list for the panel,
-// honouring the current filter and per-command enabled state.
+// honouring the current filter and per-command enabled state. Commands kept
+// out of the panel (the /toggle_* family) are never listed; they stay
+// typed-runnable through runSlashCommand.
 func (m *Model) buildPanelCommands() []panelCommand {
 	var out []panelCommand
 	for _, pc := range allPanelCommands() {
+		if !pc.panel {
+			continue
+		}
 		if m.panelFilter != "" &&
 			!strings.HasPrefix(pc.slash, m.panelFilter) &&
 			!strings.Contains(pc.slash, m.panelFilter) {
@@ -1617,6 +1656,7 @@ func (m *Model) executeCommand(pc panelCommand) (tea.Model, tea.Cmd) {
 			m.cancelPrompt()
 		}
 		m.activeSessionID = ""
+		m.sessionTitle = ""
 		m.messages = nil
 		m.renderCache = nil
 		m.renderSeq = 0
@@ -1984,12 +2024,12 @@ func (m *Model) execSelectedSession() (tea.Model, tea.Cmd) {
 	m.loading = true
 	m.replaying = true
 	m.statusText = "Loading session..."
-	return m, m.loadSessionCmd(item.id)
+	return m, m.loadSessionCmd(item.id, item.title)
 }
 
 // loadSessionCmd closes the current session (if different) and loads the
 // target, replaying its history into the event stream.
-func (m *Model) loadSessionCmd(id string) tea.Cmd {
+func (m *Model) loadSessionCmd(id, title string) tea.Cmd {
 	// Snapshot backend state: the closure runs on a bubbletea command
 	// goroutine, off the event loop (activeSessionID can change mid-flight).
 	sess, ctx, workDir, activeID := m.acpSession, m.ctx, m.workDir, m.activeSessionID
@@ -2007,7 +2047,7 @@ func (m *Model) loadSessionCmd(id string) tea.Cmd {
 		if err != nil {
 			return sessionLoadedMsg{err: err}
 		}
-		msg := sessionLoadedMsg{sessionID: id, configOptions: resp.ConfigOptions}
+		msg := sessionLoadedMsg{sessionID: id, title: title, configOptions: resp.ConfigOptions}
 		if resp.Modes != nil {
 			msg.mode = string(resp.Modes.CurrentModeID)
 		}

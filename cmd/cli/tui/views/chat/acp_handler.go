@@ -175,7 +175,9 @@ func (h *acpEventHandler) OnUsageUpdate(used, total int, cost *openacp.Cost) {
 	h.program.Send(usageUpdateMsg{used: used, total: total})
 }
 
-func (h *acpEventHandler) OnSessionInfo(title string, metadata map[string]any) {}
+func (h *acpEventHandler) OnSessionInfo(title string, metadata map[string]any) {
+	h.program.Send(sessionInfoMsg{title: title})
+}
 
 // ── ClientRequestHandler ──
 
