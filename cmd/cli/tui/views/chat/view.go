@@ -585,7 +585,7 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 		}
 	}
 
-	chipParts := make([]string, 0, len(req.Options)*2)
+	chipParts := make([]string, 0, len(req.Options)*2+2)
 	for i, opt := range req.Options {
 		name := opt.Name
 		if name == "" {
@@ -601,39 +601,67 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 			chipParts = append(chipParts, muted.Render(name))
 		}
 	}
+	// The synthetic "Custom..." chip opens the free-text line (client-side
+	// only — the server's option list is untouched; submitting rides
+	// reject_once with the text as feedback). It sits one past the last
+	// server option in the ↑↓ order.
+	if len(req.Options) > 0 {
+		chipParts = append(chipParts, panel.Render("  "))
+	}
+	if m.permissionSelectedIdx == len(req.Options) {
+		chipParts = append(chipParts,
+			theme.BaseStyle().Background(theme.Warning).Foreground(theme.TextInk).Render(" Custom... "))
+	} else {
+		chipParts = append(chipParts, muted.Render("Custom..."))
+	}
 	chips := lipgloss.JoinHorizontal(lipgloss.Left, chipParts...)
 
-	tips := lipgloss.JoinHorizontal(lipgloss.Right,
-		components.RenderCommandTipOn("↑ ↓", "switch", theme.BgSurface),
-		components.RenderCommandTipOn("esc", "cancel", theme.BgSurface),
-		components.RenderCommandTipOn("enter", "select", theme.BgSurface),
-	)
-	// Every span of the strip carries the surface background explicitly:
-	// plain spaces between styled segments sit behind an inner ANSI reset,
-	// where the outer style's background never reaches (a black hole in
-	// the middle of the strip). The strip spans the panel edge to edge,
-	// with a full-width blank strip row above and below the chips.
 	strip := theme.BaseStyle().Background(theme.BgSurface)
-	lead, trail := 2, 1
-	mid := width - utils.DisplayWidth(chips) - utils.DisplayWidth(tips) - lead - trail
-	if mid < 2 {
-		mid = 2
-	}
-	footer := lipgloss.JoinHorizontal(lipgloss.Left,
-		strip.Render(strings.Repeat(" ", lead)),
-		chips,
-		strip.Render(strings.Repeat(" ", mid)),
-		tips,
-		strip.Render(strings.Repeat(" ", trail)),
-	)
-	// Vertical breathing: a full-width blank strip row above and below the
-	// chips. The row must be width-1, not width: with the left border,
-	// lipgloss squeezes the content box to Width-1 and word-wraps a
-	// whitespace-only line one column over into nothing — the surface
-	// background collapses with it (the empty style-on-nothing span).
-	blankStrip := strip.Render(strings.Repeat(" ", width-1))
+	if m.permInputMode {
+		// Free-text mode: the chips swap for a one-line input on the same
+		// surface strip, hints below (enter sends, esc returns to chips).
+		tips := lipgloss.JoinHorizontal(lipgloss.Right,
+			components.RenderCommandTipOn("enter", "send", theme.BgSurface),
+			components.RenderCommandTipOn("esc", "back", theme.BgSurface),
+		)
+		taW := permInputWidth(m.getContentWidth())
+		pad := max(0, (width-1)-2-taW)
+		inputLine := strip.Render(" " + m.permTextarea.View() + strings.Repeat(" ", pad))
+		tipLead := max(0, (width-1)-utils.DisplayWidth(tips)-1)
+		tipsLine := strip.Render(strings.Repeat(" ", tipLead)) + tips + strip.Render(" ")
+		parts = append(parts, "", inputLine, tipsLine)
+	} else {
+		tips := lipgloss.JoinHorizontal(lipgloss.Right,
+			components.RenderCommandTipOn("↑ ↓", "switch", theme.BgSurface),
+			components.RenderCommandTipOn("esc", "cancel", theme.BgSurface),
+			components.RenderCommandTipOn("enter", "select", theme.BgSurface),
+		)
+		// Every span of the strip carries the surface background explicitly:
+		// plain spaces between styled segments sit behind an inner ANSI reset,
+		// where the outer style's background never reaches (a black hole in
+		// the middle of the strip). The strip spans the panel edge to edge,
+		// with a full-width blank strip row above and below the chips.
+		lead, trail := 2, 1
+		mid := width - utils.DisplayWidth(chips) - utils.DisplayWidth(tips) - lead - trail
+		if mid < 2 {
+			mid = 2
+		}
+		footer := lipgloss.JoinHorizontal(lipgloss.Left,
+			strip.Render(strings.Repeat(" ", lead)),
+			chips,
+			strip.Render(strings.Repeat(" ", mid)),
+			tips,
+			strip.Render(strings.Repeat(" ", trail)),
+		)
+		// Vertical breathing: a full-width blank strip row above and below the
+		// chips. The row must be width-1, not width: with the left border,
+		// lipgloss squeezes the content box to Width-1 and word-wraps a
+		// whitespace-only line one column over into nothing — the surface
+		// background collapses with it (the empty style-on-nothing span).
+		blankStrip := strip.Render(strings.Repeat(" ", width-1))
 
-	parts = append(parts, "", blankStrip, footer, blankStrip)
+		parts = append(parts, "", blankStrip, footer, blankStrip)
+	}
 	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
 	borderColor := theme.Warning

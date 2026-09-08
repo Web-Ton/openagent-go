@@ -24,6 +24,7 @@ import (
 	"github.com/yusheng-g/openagent-go/cmd/cli/tui/layout"
 	"github.com/yusheng-g/openagent-go/cmd/cli/tui/theme"
 	"github.com/yusheng-g/openagent-go/cmd/cli/tui/utils"
+	"github.com/yusheng-g/openagent-go/version"
 )
 
 // This package implements the TUI chat page: welcome screen, input, ACP
@@ -45,6 +46,11 @@ const (
 	PlaceholderPrefix = "Ask anything ... e.g. "
 	PlaceholderSuffix = " (Tab to accept)"
 )
+
+// permInputTipsWidth is the display width of the key-hint tail rendered
+// beside the permission dialog's custom-input line (" enter send  esc back
+// " — RenderCommandTipOn emits a leading space per pair).
+const permInputTipsWidth = 24
 
 // Model is the chat page model. It is deliberately render-only: no ACP client,
 // no event loop, no input history. NewModel takes plain parameters so the TUI
@@ -100,6 +106,15 @@ type Model struct {
 	permissionReq         *openacp.RequestPermissionRequest
 	permissionReplyCh     chan openacp.RequestPermissionResponse
 	permissionSelectedIdx int
+
+	// permInputMode is the free-text entry behind the dialog's "Custom..."
+	// chip: the chips strip swaps for a one-line input and typing goes to
+	// permTextarea. Submitting rides the reject path the server already
+	// supports — the text travels as the outcome's feedback and the kernel
+	// turns the deny reason into the tool result the model reads, so the
+	// agent adapts to what the user asked to do instead.
+	permInputMode bool
+	permTextarea  textarea.Model
 
 	chatViewport viewport.Model
 	chatTextarea textarea.Model
@@ -567,6 +582,7 @@ func NewModel(ctx context.Context, cancel context.CancelFunc, workDir, ver, mode
 		focus: FocusChat,
 
 		chatTextarea: ta,
+		permTextarea: newPermTextarea(defaultWidth),
 		spinner:      components.NewLoading([]string{"|", "/", "-", "\\"}),
 		loading:      false,
 
@@ -787,6 +803,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.permissionReq = &msg.req
 		m.permissionReplyCh = msg.replyCh
 		m.permissionSelectedIdx = 0
+		// A leftover input draft from a previous dialog must not bleed in.
+		m.permInputMode = false
+		m.permTextarea.SetValue("")
 		m.viewportDirty = true
 		return m, nil
 
@@ -1423,7 +1442,8 @@ func (m *Model) permissionOptionAt(y int) int {
 }
 
 // respondPermission sends the user's selection back to the ACP server via
-// the reply channel. idx >= 0 selects option[idx]; idx < 0 cancels.
+// the reply channel. idx >= 0 selects option[idx] (idx == len(Options) is
+// the synthetic "Custom..." chip); idx < 0 cancels.
 func (m *Model) respondPermission(idx int) {
 	if m.permissionReq == nil || m.permissionReplyCh == nil {
 		return
@@ -1443,10 +1463,86 @@ func (m *Model) respondPermission(idx int) {
 		}
 	}
 	m.permissionReplyCh <- resp
+	m.closePermissionDialog()
+}
+
+// respondPermissionInstead submits the free-text "do this instead"
+// instruction from the dialog's custom input. It rides the reject_once
+// outcome the server already understands: the text lands in the outcome's
+// feedback meta, the approver turns it into the deny reason, and the kernel
+// writes that reason into the tool result the model reads — so the agent
+// sees the user's instruction and adapts instead of executing the call.
+func (m *Model) respondPermissionInstead(text string) {
+	if m.permissionReq == nil || m.permissionReplyCh == nil {
+		return
+	}
+	optID := openacp.PermissionOptionId("reject_once")
+	m.permissionReplyCh <- openacp.RequestPermissionResponse{
+		Outcome: openacp.RequestPermissionOutcome{
+			Outcome:  "selected",
+			OptionID: &optID,
+			Meta:     map[string]any{"feedback": text},
+		},
+	}
+	m.closePermissionDialog()
+}
+
+// closePermissionDialog tears down the open dialog and its transient
+// custom-input state.
+func (m *Model) closePermissionDialog() {
 	m.permissionReq = nil
 	m.permissionReplyCh = nil
+	m.permInputMode = false
+	m.permTextarea.SetValue("")
 	// The dialog closing unhides the pending tool rows it was suppressing.
 	m.viewportDirty = true
+}
+
+// newPermTextarea builds the dialog's free-text line: a slim one-row
+// surface-styled textarea with a block blinking cursor, matching the main
+// input's treatment.
+func newPermTextarea(width int) textarea.Model {
+	ta := textarea.New()
+	styles := textarea.Styles{}
+	styles.Focused.Base = theme.BaseStyle().Background(theme.BgSurface)
+	styles.Focused.Placeholder = theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.TextAsh)
+	styles.Focused.CursorLine = lipgloss.NewStyle().Background(theme.BgSurface)
+	styles.Focused.EndOfBuffer = theme.BaseStyle().Background(theme.BgSurface)
+	styles.Blurred.Base = theme.BaseStyle().Background(theme.BgSurface)
+	styles.Blurred.Placeholder = theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.TextAsh)
+	styles.Blurred.EndOfBuffer = theme.BaseStyle().Background(theme.BgSurface)
+	styles.Cursor = textarea.CursorStyle{
+		Color:      theme.TextNormal,
+		Shape:      tea.CursorBlock,
+		Blink:      true,
+		BlinkSpeed: 530 * time.Millisecond,
+	}
+	ta.SetStyles(styles)
+	ta.Prompt = ""
+	ta.ShowLineNumbers = false
+	ta.CharLimit = 4096
+	ta.SetWidth(width)
+	ta.SetHeight(1)
+	return ta
+}
+
+// enterPermInput swaps the dialog's chips for the free-text line, whose
+// placeholder points at the agent by its branded name (opencode's
+// "tell <agent> what to do instead").
+func (m *Model) enterPermInput() tea.Cmd {
+	m.permTextarea = newPermTextarea(permInputWidth(m.getContentWidth()))
+	m.permTextarea.Placeholder = fmt.Sprintf("tell %s what to do instead", version.Name)
+	m.permTextarea.Focus()
+	m.permTextarea.CursorEnd()
+	m.permInputMode = true
+	// Kick the cursor blink so the block cycles like the main input's.
+	return func() tea.Msg { return textarea.Blink() }
+}
+
+// permInputWidth sizes the custom-input line: the panel's inner width
+// minus the strip padding and the key-hint tail rendered beside it.
+func permInputWidth(contentWidth int) int {
+	return max(12, contentWidth-1-permInputTipsWidth)
 }
 
 // escPressed implements Esc outside the permission dialog: it clears the
@@ -2410,6 +2506,9 @@ func (m *Model) updateWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.chatViewport.SetWidth(layout.GetTranscriptWidth(m.width))
 	m.chatViewport.SetHeight(layout.GetViewHeight(m.height))
 	m.updateInputWidth()
+	if m.permInputMode {
+		m.permTextarea.SetWidth(permInputWidth(m.getContentWidth()))
+	}
 	m.viewportDirty = true
 	m.textareaDirty = true
 	return m, nil

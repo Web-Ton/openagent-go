@@ -212,8 +212,29 @@ func (m *Model) syncSlashSheet() {
 
 // handlePermissionKey routes a keypress while a tool-call permission dialog is
 // open. The user's selection is written back through the reply channel; a
-// non-nil command (tea.Quit) is returned for Ctrl+C.
+// non-nil command (tea.Quit) is returned for Ctrl+C. The synthetic
+// "Custom..." chip (index == len(Options)) swaps the chips for a free-text
+// line; its submit rides reject_once with the text as feedback.
 func (m *Model) handlePermissionKey(k tea.KeyPressMsg) tea.Cmd {
+	if m.permInputMode {
+		switch k.String() {
+		case "ctrl+c":
+			return tea.Quit
+		case "esc":
+			// Back to the chips, dialog still open — a second esc (from
+			// chip mode) cancels as before.
+			m.permInputMode = false
+		case "enter":
+			if text := strings.TrimSpace(m.permTextarea.Value()); text != "" {
+				m.respondPermissionInstead(text)
+			}
+		default:
+			var tcmd tea.Cmd
+			m.permTextarea, tcmd = m.permTextarea.Update(k)
+			return tcmd
+		}
+		return nil
+	}
 	switch k.String() {
 	case "ctrl+c":
 		return tea.Quit
@@ -224,10 +245,14 @@ func (m *Model) handlePermissionKey(k tea.KeyPressMsg) tea.Cmd {
 			m.permissionSelectedIdx--
 		}
 	case "down", "right":
-		if m.permissionReq != nil && m.permissionSelectedIdx < len(m.permissionReq.Options)-1 {
+		// One past the server options sits the synthetic "Custom..." chip.
+		if m.permissionReq != nil && m.permissionSelectedIdx < len(m.permissionReq.Options) {
 			m.permissionSelectedIdx++
 		}
 	case "enter":
+		if m.permissionReq != nil && m.permissionSelectedIdx == len(m.permissionReq.Options) {
+			return m.enterPermInput()
+		}
 		m.respondPermission(m.permissionSelectedIdx)
 	}
 	return nil

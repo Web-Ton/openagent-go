@@ -4365,3 +4365,106 @@ func TestSelectionClearsOnContentChange(t *testing.T) {
 		t.Fatalf("content change did not clear the selection")
 	}
 }
+
+// TestPermissionCustomInput drives the "Custom..." free-text entry: it is
+// one past the server options in the ↑↓ order, enter swaps the chips for a
+// focused input line (placeholder naming the agent), typing goes to the
+// perm textarea, and a non-empty submit rides reject_once with the text as
+// feedback so the model reads the instruction. Esc returns to the chips
+// with the dialog still open; a fresh dialog starts clean.
+func TestPermissionCustomInput(t *testing.T) {
+	m := newTestModel()
+	replyCh := make(chan openacp.RequestPermissionResponse, 1)
+	m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
+		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1", Title: "shell bun install"},
+		Options: []openacp.PermissionOption{
+			{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce},
+			{OptionID: "allow_always", Name: "Allow always", Kind: openacp.PermissionAllowAlways},
+			{OptionID: "reject_once", Name: "Reject", Kind: openacp.PermissionRejectOnce},
+		},
+	}, replyCh: replyCh})
+
+	down := tea.KeyPressMsg{Code: tea.KeyDown}
+	enter := tea.KeyPressMsg{Code: tea.KeyEnter}
+	esc := tea.KeyPressMsg{Code: tea.KeyEscape}
+
+	// Chips render with the synthetic Custom... tail.
+	if doc := utils.StripANSI(m.renderPermissionPanel(m.getContentWidth()-1, 0)); !strings.Contains(doc, "Custom...") {
+		t.Fatalf("Custom chip missing from the dialog:\n%s", doc)
+	}
+
+	// Walk to the Custom chip and enter it.
+	for i := 0; i < 3; i++ {
+		m.Update(down)
+	}
+	if m.permissionSelectedIdx != 3 {
+		t.Fatalf("selection = %d, want 3 (the Custom chip)", m.permissionSelectedIdx)
+	}
+	m.Update(enter)
+	if !m.permInputMode {
+		t.Fatalf("enter on Custom did not open the input line")
+	}
+	panel := utils.StripANSI(m.renderPermissionPanel(m.getContentWidth()-1, 0))
+	if !strings.Contains(panel, "tell openagent what to do instead") {
+		t.Fatalf("input line placeholder missing:\n%s", panel)
+	}
+	if strings.Contains(panel, "Allow once") {
+		t.Fatalf("chips must be hidden in input mode:\n%s", panel)
+	}
+
+	// Esc returns to the chips, dialog still open.
+	m.Update(esc)
+	if m.permInputMode || m.permissionReq == nil {
+		t.Fatalf("esc from input mode must return to the chips, not close the dialog")
+	}
+
+	// Re-enter, type the instruction, submit.
+	m.Update(enter)
+	for _, r := range "run test instead" {
+		m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	m.Update(enter)
+
+	select {
+	case resp := <-replyCh:
+		if resp.Outcome.Outcome != openacp.PermissionOutcomeSelected {
+			t.Fatalf("outcome = %q, want selected", resp.Outcome.Outcome)
+		}
+		if resp.Outcome.OptionID == nil || *resp.Outcome.OptionID != "reject_once" {
+			t.Fatalf("optionId = %v, want reject_once", resp.Outcome.OptionID)
+		}
+		if got := resp.Outcome.Meta["feedback"]; got != "run test instead" {
+			t.Fatalf("feedback = %v, want the typed instruction", got)
+		}
+	default:
+		t.Fatalf("submit produced no response on the reply channel")
+	}
+	if m.permissionReq != nil || m.permInputMode {
+		t.Fatalf("dialog and input mode must reset after the submit")
+	}
+}
+
+// TestPermissionCustomInputEmptySubmit checks the guard: enter on an empty
+// (or whitespace) input stays in input mode and sends nothing.
+func TestPermissionCustomInputEmptySubmit(t *testing.T) {
+	m := newTestModel()
+	replyCh := make(chan openacp.RequestPermissionResponse, 1)
+	m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
+		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1"},
+		Options:  []openacp.PermissionOption{{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce}},
+	}, replyCh: replyCh})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyDown}) // → Custom chip
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.permInputMode {
+		t.Fatalf("input mode not entered")
+	}
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}) // empty submit
+	if !m.permInputMode || m.permissionReq == nil {
+		t.Fatalf("empty submit must keep the input open")
+	}
+	select {
+	case resp := <-replyCh:
+		t.Fatalf("empty submit sent a response: %+v", resp)
+	default:
+	}
+}
