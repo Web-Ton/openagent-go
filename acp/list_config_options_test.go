@@ -31,8 +31,11 @@ func TestOnListConfigOptionsDefaults(t *testing.T) {
 	if !ok {
 		t.Fatal("config options must include the mode select")
 	}
-	if mode.CurrentValue != "auto" {
-		t.Errorf("mode currentValue = %v, want auto (default)", mode.CurrentValue)
+	// Must advertise the server's REAL default (manual), not a hardcoded
+	// value: the cold-start picker preselects on this, and a phantom "auto"
+	// made the first switch to auto a no-op (value == current early return).
+	if want := srv.defaultMode(); mode.CurrentValue != want {
+		t.Errorf("mode currentValue = %v, want %q (server default)", mode.CurrentValue, want)
 	}
 	tl, ok := byID["thought_level"]
 	if !ok {

@@ -1550,7 +1550,11 @@ func (s *AgentServer) OnListConfigOptions(ctx context.Context, req openacp.ListC
 
 func (s *AgentServer) buildConfigOptions(sid openacp.SessionId) []openacp.SessionConfigOption {
 	ss := s.getSession(sid)
-	mode := "auto"
+	// The session-less shape (list_config_options at boot) must advertise the
+	// server's real default — hardcoding "auto" here desynced the cold-start
+	// mode picker: the client believed auto was already selected, so picking
+	// auto hit the no-change early return and the first switch did nothing.
+	mode := s.defaultMode()
 	thoughtLevel := "medium"
 	modelID := s.GetDefaultModelID()
 	if ss != nil {
