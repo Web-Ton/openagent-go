@@ -351,7 +351,9 @@ func allPanelCommands() []panelCommand {
 		{"/sessions", "Switch session", actionSessions, true, false, true},
 		{"/new", "New session", actionNew, true, false, true},
 		{"/models", "Switch model", actionModels, true, false, true},
-		{"/toggle_mode", "Switch mode", actionToggleMode, true, false, false},
+		// /toggle_mode stays listed: switching modes is a primary action,
+		// unlike the visibility toggles below it (typed-runnable only).
+		{"/toggle_mode", "Switch mode", actionToggleMode, true, false, true},
 		{"/thought_level", "Switch thought level", actionThoughtLevel, true, false, true},
 		{"/compact", "Compact session context", actionCompact, true, false, true},
 		{"/toggle_thinking", "Expand thinking content", actionToggleThinking, true, true, false},

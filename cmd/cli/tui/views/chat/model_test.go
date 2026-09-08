@@ -299,12 +299,23 @@ func TestPanelCtrlPOpenAndFilter(t *testing.T) {
 // TestPanelHidesToggleFamily guards the /toggle_* commands staying out of
 // the command panel: neither the Ctrl+P palette nor the "/" sheet lists
 // them, but they stay registered so typed input still runs them.
+// TestPanelHidesToggleFamily pins the command-panel listing rule: mode
+// switching is a primary action and stays listed, while the visibility
+// toggles (/toggle_thinking and friends) are typed-runnable only.
 func TestPanelHidesToggleFamily(t *testing.T) {
 	m := newTestModel()
+	var listedMode bool
 	for _, pc := range m.buildPanelCommands() {
+		if pc.slash == "/toggle_mode" {
+			listedMode = true
+			continue
+		}
 		if strings.HasPrefix(pc.slash, "/toggle_") {
 			t.Errorf("toggle command %s must not appear in the command panel", pc.slash)
 		}
+	}
+	if !listedMode {
+		t.Error("/toggle_mode must stay listed in the command panel")
 	}
 	if !registeredSlash("/toggle_thinking") {
 		t.Error("/toggle_thinking must stay registered for typed input")
@@ -2290,18 +2301,45 @@ func TestSlashSheetEnterNoMatchKeepsSheet(t *testing.T) {
 func TestSlashSheetEnterPartialToggleKeepsSheet(t *testing.T) {
 	m := newTestModel()
 	m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	for _, r := range "toggle_t" {
+		m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	m2, _ := enterKey(m)
+	// "/toggle_t" matches only unlisted visibility toggles, so the sheet
+	// stays open with the text kept for editing and nothing fires.
+	if !m2.panelOpen {
+		t.Error("enter on a partial toggle name should keep the sheet open")
+	}
+	if got := m2.chatTextarea.Value(); got != "/toggle_t" {
+		t.Errorf("input box = %q, want %q (kept for editing)", got, "/toggle_t")
+	}
+	if m2.visibleConfig.ExpandThinking {
+		t.Error("partial /toggle must not fire any toggle")
+	}
+}
+
+// TestSlashSheetEnterRunsListedToggleMode pins /toggle_mode's place in the
+// panel: "/toggle" uniquely matches the listed Switch mode command, so
+// enter opens the mode config panel instead of keeping the sheet.
+func TestSlashSheetEnterRunsListedToggleMode(t *testing.T) {
+	m := newTestModel()
+	m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
 	for _, r := range "toggle" {
 		m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
 	}
 	m2, _ := enterKey(m)
-	if !m2.panelOpen {
-		t.Error("enter on a partial toggle name should keep the sheet open")
+	// The command ran: the slash sheet is gone (with a live backend the mode
+	// config panel replaces it; without one the panel bails and closes —
+	// either way the sheet itself is not showing), and the input was
+	// consumed.
+	if m2.panelOpen && m2.panelFromSlash {
+		t.Error("enter on the unique listed match should leave the slash sheet")
 	}
-	if got := m2.chatTextarea.Value(); got != "/toggle" {
-		t.Errorf("input box = %q, want %q (kept for editing)", got, "/toggle")
+	if got := m2.chatTextarea.Value(); got != "" {
+		t.Errorf("input box = %q, want cleared (command consumed it)", got)
 	}
 	if m2.visibleConfig.ExpandThinking {
-		t.Error("partial /toggle must not fire any toggle")
+		t.Error("enter on /toggle must not fire a visibility toggle")
 	}
 }
 
