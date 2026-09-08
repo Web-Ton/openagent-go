@@ -52,6 +52,14 @@ const (
 // " — RenderCommandTipOn emits a leading space per pair).
 const permInputTipsWidth = 24
 
+// quitArmWindow is how long a ctrl+c quit intent stays armed: quitting
+// needs two ctrl+c within this window (a single press must never kill a
+// session that is only momentarily idle).
+const quitArmWindow = 3 * time.Second
+
+// quitHint is the toast shown while a quit intent is armed.
+const quitHint = "Press ctrl+c again to quit"
+
 // Model is the chat page model. It is deliberately render-only: no ACP client,
 // no event loop, no input history. NewModel takes plain parameters so the TUI
 // can boot standalone without a backend.
@@ -157,6 +165,10 @@ type Model struct {
 
 	// selection is the transcript's in-app box selection (see selection.go).
 	selection selectionFields
+
+	// quitArmedAt marks a ctrl+c quit intent; zero means disarmed. A second
+	// ctrl+c within quitArmWindow quits (armQuit).
+	quitArmedAt time.Time
 
 	// compacting is true while a /compact control round-trip is in flight.
 	// The agent's slash registry intercepts the text and compacts the
@@ -663,6 +675,10 @@ type sessionInfoMsg struct{ title string }
 // servers with their connect outcome (sidebar section). Full snapshot.
 type mcpServersMsg struct{ servers []openacp.McpServerStatus }
 
+// quitArmTickMsg fires quitArmWindow after a ctrl+c armed the quit intent:
+// past the window the arm lapses and the hint clears.
+type quitArmTickMsg struct{}
+
 // retryingMsg — sessionUpdate "model_retrying": the model call hit a
 // transient error and the kernel backs off before the next attempt.
 // Turn-scoped transient state: never stored, never replayed.
@@ -815,6 +831,16 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewportDirty = true
 		return m, nil
 
+	case quitArmTickMsg:
+		// The window lapsed (a re-arm resets the timestamp, so a stale tick
+		// from an earlier arm leaves a fresh arm alone).
+		if !m.quitArmedAt.IsZero() && time.Since(m.quitArmedAt) >= quitArmWindow-50*time.Millisecond {
+			m.quitArmedAt = time.Time{}
+			if m.notifyMsg == quitHint {
+				m.notifyMsg = ""
+			}
+		}
+		return m, nil
 	case retryingMsg:
 		m.retry = &retryState{
 			attempt: msg.attempt, max: msg.max, delay: msg.delay,
@@ -859,7 +885,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cancelPrompt()
 					return m, nil
 				}
-				return m, tea.Quit
+				return m, m.armQuit()
 			case "ctrl+p":
 				m.panelOpen = true
 				m.panelMode = panelModeCommand
@@ -1552,6 +1578,18 @@ func (m *Model) enterPermInput() tea.Cmd {
 // minus the strip padding and the key-hint tail rendered beside it.
 func permInputWidth(contentWidth int) int {
 	return max(12, contentWidth-1-permInputTipsWidth)
+}
+
+// armQuit gates quitting behind two ctrl+c within quitArmWindow. The first
+// press arms the intent and toasts a hint; the tick (or any later state
+// change through the Update case) disarms when the window lapses.
+func (m *Model) armQuit() tea.Cmd {
+	if !m.quitArmedAt.IsZero() && time.Since(m.quitArmedAt) <= quitArmWindow {
+		return tea.Quit
+	}
+	m.quitArmedAt = time.Now()
+	m.notifyMsg = quitHint
+	return tea.Tick(quitArmWindow, func(time.Time) tea.Msg { return quitArmTickMsg{} })
 }
 
 // escPressed implements Esc outside the permission dialog: it clears the

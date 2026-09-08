@@ -211,15 +211,17 @@ func (m *Model) syncSlashSheet() {
 }
 
 // handlePermissionKey routes a keypress while a tool-call permission dialog is
-// open. The user's selection is written back through the reply channel; a
-// non-nil command (tea.Quit) is returned for Ctrl+C. The synthetic
+// open. The user's selection is written back through the reply channel;
+// Ctrl+C arms the two-press quit gate. The synthetic
 // "Custom..." chip (index == len(Options)) swaps the chips for a free-text
 // line; its submit rides reject_once with the text as feedback.
 func (m *Model) handlePermissionKey(k tea.KeyPressMsg) tea.Cmd {
 	if m.permInputMode {
 		switch k.String() {
 		case "ctrl+c":
-			return tea.Quit
+			// Quitting over an unanswered dialog is gated like everywhere
+			// else: two ctrl+c within the window.
+			return m.armQuit()
 		case "esc":
 			// Back to the chips, dialog still open — a second esc (from
 			// chip mode) cancels as before.
@@ -237,7 +239,7 @@ func (m *Model) handlePermissionKey(k tea.KeyPressMsg) tea.Cmd {
 	}
 	switch k.String() {
 	case "ctrl+c":
-		return tea.Quit
+		return m.armQuit()
 	case "esc":
 		m.respondPermission(-1)
 	case "up", "left":

@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -263,11 +264,77 @@ func TestCtrlCCancelsWhenLoading(t *testing.T) {
 	}
 }
 
-func TestCtrlCQuitsWhenIdle(t *testing.T) {
+// isQuitCmd identifies tea.Quit among returned commands (armQuit's tick is
+// indistinguishable from a quit by nil-checking alone).
+func isQuitCmd(cmd tea.Cmd) bool {
+	return cmd != nil && reflect.ValueOf(cmd).Pointer() == reflect.ValueOf(tea.Quit).Pointer()
+}
+
+// TestCtrlCQuitNeedsDoublePress pins the quit gate: an idle ctrl+c only
+// arms the intent (hint toast, tick scheduled); a second press inside
+// quitArmWindow quits; a press after the window lapsed re-arms instead.
+func TestCtrlCQuitNeedsDoublePress(t *testing.T) {
 	m := newTestModel()
+
 	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
-	if cmd == nil {
-		t.Fatal("ctrl+c while idle should quit")
+	if isQuitCmd(cmd) {
+		t.Fatal("a single idle ctrl+c must not quit")
+	}
+	if m.quitArmedAt.IsZero() || m.notifyMsg != quitHint {
+		t.Fatalf("first ctrl+c must arm the quit intent, got armed=%v hint=%q", m.quitArmedAt.IsZero(), m.notifyMsg)
+	}
+
+	if _, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}); !isQuitCmd(cmd) {
+		t.Fatal("a second ctrl+c within the window must quit")
+	}
+}
+
+// TestCtrlCQuitArmExpires checks the 3s lapse: an arm older than the window
+// does not turn the next ctrl+c into a quit — it re-arms instead.
+func TestCtrlCQuitArmExpires(t *testing.T) {
+	m := newTestModel()
+	m.quitArmedAt = time.Now().Add(-quitArmWindow - time.Second)
+	m.notifyMsg = quitHint
+
+	// The lapse tick disarms and clears the hint.
+	upd, _ := m.Update(quitArmTickMsg{})
+	m = upd.(*Model)
+	if !m.quitArmedAt.IsZero() || m.notifyMsg != "" {
+		t.Fatalf("tick must disarm, got armed=%v hint=%q", !m.quitArmedAt.IsZero(), m.notifyMsg)
+	}
+
+	// A fresh press re-arms (a stale arm must not quit).
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if isQuitCmd(cmd) {
+		t.Fatal("ctrl+c on a lapsed arm must re-arm, not quit")
+	}
+}
+
+// TestCtrlCQuitGatedOverPermissionDialog checks the gate on the approval
+// dialog: ctrl+c arms instead of killing the session with the request
+// unanswered; the second press quits.
+func TestCtrlCQuitGatedOverPermissionDialog(t *testing.T) {
+	m := newTestModel()
+	replyCh := make(chan openacp.RequestPermissionResponse, 1)
+	m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
+		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1"},
+		Options:  []openacp.PermissionOption{{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce}},
+	}, replyCh: replyCh})
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if isQuitCmd(cmd) {
+		t.Fatal("ctrl+c over an open dialog must arm, not quit")
+	}
+	if m.permissionReq == nil {
+		t.Fatalf("arming must leave the dialog open")
+	}
+	if _, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}); !isQuitCmd(cmd) {
+		t.Fatal("second ctrl+c over the dialog must quit")
+	}
+	select {
+	case resp := <-replyCh:
+		t.Fatalf("quitting must not answer the dialog: %+v", resp)
+	default:
 	}
 }
 
