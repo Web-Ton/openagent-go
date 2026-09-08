@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"fmt"
 	"os"
 
 	tea "charm.land/bubbletea/v2"
@@ -17,19 +16,15 @@ import (
 	"github.com/yusheng-g/openagent-go/version"
 )
 
-// Mouse tracking is driven by hand instead of bubbletea's built-in modes.
-// tea.MouseModeCellMotion emits \x1b[?1002h (button-event tracking), which
-// forwards every button drag to the app and disables the terminal emulator's
-// native text selection. Enabling \x1b[?1000h (normal tracking) instead
-// still delivers wheel and click events — ultraviolet parses SGR mouse codes
-// regardless of the rendered mode — but leaves drags free so the user can
-// box-select text (e.g. to copy from the transcript). The tracking is
-// enabled before the program starts rendering and reset right after it
-// exits, so the mode never lingers in the shell.
-const (
-	mouseTrackingEnable  = "\x1b[?1000h\x1b[?1006h"
-	mouseTrackingDisable = "\x1b[?1000l\x1b[?1006l"
-)
+// Mouse tracking runs in bubbletea's cell-motion mode (1002h + SGR 1006):
+// clicks, wheel, drags and motion are all delivered to the app. This powers
+// the scrollbar drag and the in-transcript box selection, whose highlight is
+// drawn by the app and whose copy lands in the clipboard via OSC 52
+// (tea.SetClipboard). The app-owned mode replaces the terminal's native text
+// selection for the duration of the session; terminals honoring the xterm
+// convention keep plain drag native while Shift is held. bubbletea writes the
+// mode switches inside its own frame buffer (per-View diff) and resets them
+// on exit, so no hand-written sequences are involved here.
 
 // StartInteractiveTUI launches the fullscreen interactive TUI. It runs the
 // ACP server in-process via os.Pipe (no subprocess), connects as an ACP
@@ -68,13 +63,6 @@ func StartInteractiveTUI(ctx context.Context, cfg config.Config) error {
 	// rendering as authored. See cmd/cli/tui/views/chat for the styling.
 	p := tea.NewProgram(model, tea.WithColorProfile(colorprofile.TrueColor))
 	model.SetProgram(p)
-
-	// See the mouseTracking* consts above: 1000h tracking (not tea's 1002h
-	// CellMotion) keeps wheel/click handling while freeing drags for native
-	// text selection. Written before the renderer starts and reset after the
-	// program exits, so there is no write interleaving with rendered frames.
-	fmt.Fprint(os.Stdout, mouseTrackingEnable)
-	defer fmt.Fprint(os.Stdout, mouseTrackingDisable)
 
 	go startACPInProcess(ctx, model, p, cfg, ver, workDir)
 

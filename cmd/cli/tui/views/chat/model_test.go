@@ -4167,14 +4167,98 @@ func TestWindowTitle(t *testing.T) {
 	}
 }
 
-// TestViewMouseModeNone guards the text-selection fix: the TUI must not
-// enable bubbletea's CellMotion mouse mode. CellMotion emits \x1b[?1002h,
-// which forwards every button drag to the app and disables the terminal
-// emulator's native text selection. Mouse tracking is driven manually in
-// app.go as plain 1000h tracking (wheel/click still arrive, drags stay free
-// for box selection).
-func TestViewMouseModeNone(t *testing.T) {
-	if got := createView("hello").MouseMode; got != tea.MouseModeNone {
-		t.Errorf("MouseMode = %v, want MouseModeNone (manual 1000h tracking)", got)
+// TestViewMouseModeCellMotion guards the mouse-interaction design: the TUI
+// must run in bubbletea's CellMotion mode (1002h + SGR 1006) so clicks,
+// wheel, drags and motion all reach the app — the scrollbar drag and the
+// in-transcript box selection both need motion events. App-owned selection
+// replaces the terminal's native text selection; see app.go for the
+// trade-off notes.
+func TestViewMouseModeCellMotion(t *testing.T) {
+	if got := createView("hello").MouseMode; got != tea.MouseModeCellMotion {
+		t.Errorf("MouseMode = %v, want MouseModeCellMotion (scrollbar drag + box selection)", got)
+	}
+}
+
+// TestScrollbarDrag drives the drag state machine directly: a track click
+// jumps the thumb under the cursor, held-button motion maps cursor rows to
+// scroll offsets (even when the cursor strays off the bar column), and the
+// matching release ends the drag.
+func TestScrollbarDrag(t *testing.T) {
+	m := newTestModel()
+	for i := 0; i < 30; i++ {
+		m.messages = append(m.messages, ChatMessage{Role: "assistant", Content: "drag test line"})
+	}
+	m.inChat = true
+	m.width, m.height = 120, 24
+	m.syncViewport()
+	if total := m.chatViewport.TotalLineCount(); total <= m.chatViewport.Height() {
+		t.Fatalf("transcript must overflow the viewport: total=%d", total)
+	}
+	m.chatViewport.GotoBottom()
+	m.needAutoScroll = false
+	m.syncViewport()
+	if m.chatViewport.YOffset() == 0 {
+		t.Fatalf("expected a non-zero offset at the bottom")
+	}
+
+	// Track press above the thumb: jump so the cursor sits mid-thumb.
+	upd, _ := m.Update(tea.MouseClickMsg(tea.Mouse{X: m.scrollbarX(), Y: 2, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if !m.sbarDrag {
+		t.Fatalf("track press did not start a drag")
+	}
+	if got := m.chatViewport.YOffset(); got > 4 {
+		t.Fatalf("track click near the top jumped to offset %d, want ~0", got)
+	}
+	if m.needAutoScroll {
+		t.Fatalf("dragging away from the bottom must break auto-scroll")
+	}
+
+	// Held-button motion, cursor drifting off the bar column.
+	upd, _ = m.Update(tea.MouseMotionMsg(tea.Mouse{X: 3, Y: 16, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if got := m.chatViewport.YOffset(); got == 0 {
+		t.Fatalf("motion did not scroll")
+	}
+
+	upd, _ = m.Update(tea.MouseReleaseMsg(tea.Mouse{X: 3, Y: 16, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if m.sbarDrag {
+		t.Fatalf("release did not end the drag")
+	}
+}
+
+// TestScrollbarDragGuards checks the press paths that must NOT start a drag:
+// a miss off the bar column, a press below the viewport, and a short
+// document with no thumb.
+func TestScrollbarDragGuards(t *testing.T) {
+	m := newTestModel()
+	m.messages = []ChatMessage{{Role: "assistant", Content: "short"}}
+	m.inChat = true
+	m.width, m.height = 120, 24
+	m.syncViewport()
+
+	// Document fits: no drag even on the bar column.
+	upd, _ := m.Update(tea.MouseClickMsg(tea.Mouse{X: m.scrollbarX(), Y: 2, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if m.sbarDrag {
+		t.Fatalf("drag started on a document that fits")
+	}
+
+	for i := 0; i < 30; i++ {
+		m.messages = append(m.messages, ChatMessage{Role: "assistant", Content: "drag test line"})
+	}
+	m.syncViewport()
+	// Off-column press.
+	upd, _ = m.Update(tea.MouseClickMsg(tea.Mouse{X: m.scrollbarX() - 1, Y: 2, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if m.sbarDrag {
+		t.Fatalf("drag started off the bar column")
+	}
+	// Press below the track.
+	upd, _ = m.Update(tea.MouseClickMsg(tea.Mouse{X: m.scrollbarX(), Y: m.chatViewport.Height() + 3, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if m.sbarDrag {
+		t.Fatalf("drag started below the track")
 	}
 }

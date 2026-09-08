@@ -27,11 +27,12 @@ func createView(text string) tea.View {
 	v := tea.NewView(text)
 	v.AltScreen = true
 	v.ReportFocus = true
-	// MouseMode stays None: CellMotion would emit \x1b[?1002h, which hands
-	// every button drag to the app and disables the terminal's native text
-	// selection. app.go enables plain 1000h tracking instead — wheel and
-	// click events still arrive, while drags stay free for box selection.
-	v.MouseMode = tea.MouseModeNone
+	// CellMotion (1002h + SGR 1006) hands clicks, wheel, drags and motion to
+	// the app: the scrollbar drag and the in-transcript box selection both
+	// need motion events. App-owned selection replaces the terminal's native
+	// text selection (Shift+drag stays native on xterm-convention terminals);
+	// see app.go for the full rationale.
+	v.MouseMode = tea.MouseModeCellMotion
 	v.WindowTitle = windowTitle
 	return v
 }
