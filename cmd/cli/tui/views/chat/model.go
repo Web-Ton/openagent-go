@@ -131,6 +131,13 @@ type Model struct {
 
 	needAutoScroll bool
 
+	// Scrollbar drag state: sbarDrag is true from a left press on the bar
+	// column until the matching release (see mouse.go); sbarGrab is the
+	// cursor's row offset inside the thumb at grab time, held constant so
+	// the thumb tracks the cursor 1:1 instead of jumping under it.
+	sbarDrag bool
+	sbarGrab int
+
 	// compacting is true while a /compact control round-trip is in flight.
 	// The agent's slash registry intercepts the text and compacts the
 	// history; the round-trip never enters the conversation store (nor the
@@ -1029,6 +1036,13 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		return m.handleMouseClick(msg)
+
+	case tea.MouseMotionMsg:
+		return m.handleMouseMotion(msg)
+
+	case tea.MouseReleaseMsg:
+		return m.handleMouseRelease(msg)
 
 	// ── ACP streaming events ──
 	case acpReadyMsg:
@@ -1391,7 +1405,6 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	return m, nil
 }
 
 // permissionOptionAt returns the option index for a terminal Y coordinate,
