@@ -93,10 +93,14 @@ func (h *acpEventHandler) OnContextCompacting(meta map[string]any) {
 }
 
 func (h *acpEventHandler) OnRetrying(meta map[string]any) {
+	var delay time.Duration
+	if f, ok := meta["backoff_seconds"].(float64); ok {
+		delay = time.Duration(f * float64(time.Second))
+	}
 	h.program.Send(retryingMsg{
 		attempt:   acpMetaInt(meta, "attempt"),
 		max:       acpMetaInt(meta, "max_retries"),
-		delay:     time.Duration(acpMetaInt(meta, "delay_ms")) * time.Millisecond,
+		delay:     delay,
 		errStr:    acpMetaStr(meta, "error"),
 		startedAt: time.Now(),
 	})

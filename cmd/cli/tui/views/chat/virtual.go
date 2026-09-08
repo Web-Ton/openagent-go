@@ -226,7 +226,7 @@ func (m *Model) renderVirtualDocAt(height, offset int) string {
 	emitPlaceholder(below)
 
 	// Transient retry divider: turn-scoped operational state from the
-	// agent_retrying session update — appended after the last message row,
+	// model_retrying session update — appended after the last message row,
 	// never part of the message store, gone once the model produces again.
 	if m.retry != nil {
 		b.WriteString("\n")

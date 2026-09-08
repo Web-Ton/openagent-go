@@ -631,7 +631,7 @@ type contextCompactingMsg struct{ totalMessages int }
 // renamed the session's title (generated after the first exchange).
 type sessionInfoMsg struct{ title string }
 
-// retryingMsg — sessionUpdate "agent_retrying": the model call hit a
+// retryingMsg — sessionUpdate "model_retrying": the model call hit a
 // transient error and the kernel backs off before the next attempt.
 // Turn-scoped transient state: never stored, never replayed.
 type retryingMsg struct {

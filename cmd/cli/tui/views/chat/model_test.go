@@ -1982,7 +1982,7 @@ func TestModePanelAppliesViaSetConfigOption(t *testing.T) {
 	}
 }
 
-// TestRetryingRowLifecycle: the agent_retrying update renders the
+// TestRetryingRowLifecycle: the model_retrying update renders the
 // transient backoff divider at the transcript tail (attempt progress,
 // provider error, countdown); any streamed content clears it — the model
 // is producing again — and the turn-end info row carries the retry count.

@@ -2055,24 +2055,22 @@ func (s *AgentServer) OnPrompt(ctx context.Context, req openacp.PromptRequest, s
 			})
 
 		case openagent.StreamRetrying:
-			// First-class transient update (mirrors context_compacting):
-			// retries are turn-scoped operational state, not message
-			// content — never stored, never replayed.
-			if s.updateSender != nil {
-				meta := map[string]any{
-					"attempt":     evt.Attempt,
-					"max_retries": 5,
-					"delay_ms":    evt.Delay.Milliseconds(),
-				}
-				if evt.Error != nil {
-					meta["error"] = evt.Error.Error()
-				}
+			// "model_retrying" — a transient model error triggered a retry.
+			// Sent as a custom session/update subtype (same pattern as
+			// context_compacting) so clients can show retry status without
+			// polluting the agent_thought_chunk stream.
+			if evt.Retry != nil && s.updateSender != nil {
 				s.updateSender.SendSessionUpdate(req.SessionID, openacp.SessionUpdate{
-					SessionUpdate: "agent_retrying",
-					Meta:          meta,
+					SessionUpdate: "model_retrying",
+					Meta: map[string]any{
+						"model":           evt.Retry.Model,
+						"attempt":         evt.Retry.Attempt,
+						"max_retries":     evt.Retry.MaxRetries,
+						"backoff_seconds": evt.Retry.BackoffSeconds,
+						"error":           evt.Retry.Error.Error(),
+					},
 				})
 			}
-
 		case openagent.StreamSkillsUpdated:
 			// reload_skills discovered a new skill set (install/uninstall
 			// on disk). Push the updated catalog to the client so the
