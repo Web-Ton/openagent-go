@@ -1986,6 +1986,55 @@ func TestModePanelAppliesViaSetConfigOption(t *testing.T) {
 // transient backoff divider at the transcript tail (attempt progress,
 // provider error, countdown); any streamed content clears it — the model
 // is producing again — and the turn-end info row carries the retry count.
+// TestTurnStepsOnMarkerAndSidebar pins the steps plumbing: the finished
+// prompt's kernel turn count (response _meta.turn_count) lands on the
+// turn-end marker ("N steps", alongside the retry segment) and accumulates
+// in the sidebar's session Steps counter.
+func TestTurnStepsOnMarkerAndSidebar(t *testing.T) {
+	m := newTestModel()
+	m.width, m.height = 100, 40
+	m.inChat = true
+	m.messages = []ChatMessage{
+		{Role: "user", Content: "do it", TurnId: 1, CreatedAt: todayAt(10, 0)},
+		{Role: "tool", ToolName: "shell ls", ToolStatus: toolDone, ToolCallID: "t1",
+			TurnId: 1, CreatedAt: todayAt(10, 1)},
+		{Role: "assistant", Content: "done", TurnId: 1, CreatedAt: todayAt(10, 2)},
+	}
+
+	// Mid-turn (loading) no marker renders at all; the render cache is
+	// keyed on the loading flip, mirroring the real turn rhythm.
+	m.loading = true
+	rendered, _ := m.renderMessageBlock(2, m.messages[2], layout.GetTranscriptWidth(m.width))
+	if strings.Contains(utils.StripANSI(rendered), "steps") {
+		t.Fatalf("marker must omit steps while the turn runs:\n%s", utils.StripANSI(rendered))
+	}
+
+	m.Update(promptDoneMsg{steps: 7}) // clears loading, records the count
+	rendered, _ = m.renderMessageBlock(2, m.messages[2], layout.GetTranscriptWidth(m.width))
+	if !strings.Contains(utils.StripANSI(rendered), "7 steps") {
+		t.Fatalf("turn-end marker must carry the step count:\n%s", utils.StripANSI(rendered))
+	}
+	if m.sessionSteps != 7 {
+		t.Errorf("sessionSteps = %d, want 7", m.sessionSteps)
+	}
+
+	// A second turn accumulates.
+	m.Update(promptDoneMsg{steps: 3})
+	if m.sessionSteps != 10 || m.lastTurnSteps != 3 {
+		t.Errorf("steps = %d/%d, want last 3 / session 10", m.lastTurnSteps, m.sessionSteps)
+	}
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	if got := m.View().Content; !strings.Contains(got, "Steps") || !strings.Contains(got, "10") {
+		t.Errorf("sidebar must show the cumulative Steps counter:\n%s", got)
+	}
+
+	// An unknown count (aborted / older peer) accumulates nothing.
+	m.Update(promptDoneMsg{steps: 0})
+	if m.sessionSteps != 10 || m.lastTurnSteps != 3 {
+		t.Errorf("a zero-step done must not touch the counters: %d/%d", m.lastTurnSteps, m.sessionSteps)
+	}
+}
+
 func TestRetryingRowLifecycle(t *testing.T) {
 	m := newTestModel()
 	m.width, m.height = 100, 40

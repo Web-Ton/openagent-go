@@ -2007,6 +2007,7 @@ func (s *AgentServer) OnPrompt(ctx context.Context, req openacp.PromptRequest, s
 	ch := agent.RunStream(ctx, oaSession, input)
 	var usage openagent.Usage
 	var stopReason openacp.StopReason
+	turnCount := 0
 
 	for evt := range ch {
 		switch evt.Type {
@@ -2120,6 +2121,10 @@ func (s *AgentServer) OnPrompt(ctx context.Context, req openacp.PromptRequest, s
 			if evt.Result != nil {
 				usage = evt.Result.Usage
 				stopReason = finishReasonToACP(evt.Result.StopReason)
+				// Kernel loop iterations for this prompt: model↔tool round
+				// trips. Surfaced in the response _meta so the client can
+				// show per-turn step counts.
+				turnCount = evt.Result.TurnCount
 			}
 
 		case openagent.StreamError:
@@ -2159,7 +2164,10 @@ func (s *AgentServer) OnPrompt(ctx context.Context, req openacp.PromptRequest, s
 	if stopReason == "" {
 		stopReason = openacp.StopReasonEndTurn
 	}
-	return &openacp.PromptResponse{StopReason: stopReason, Meta: map[string]any{"mode": ss.Mode()}}, nil
+	return &openacp.PromptResponse{StopReason: stopReason, Meta: map[string]any{
+		"mode":       ss.Mode(),
+		"turn_count": turnCount,
+	}}, nil
 }
 
 // ── Content block conversion ──

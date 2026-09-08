@@ -146,6 +146,14 @@ type Model struct {
 	// prompt is appended — client-side diagnostics only.
 	lastTurnRetries int
 
+	// lastTurnSteps is the finished turn's kernel step count (model↔tool
+	// round trips, from the prompt response _meta.turn_count); 0 while the
+	// turn runs or when unknown. sessionSteps accumulates the known counts
+	// over the session — live turns only (replayed history carries no
+	// per-turn step counts), so it restarts on session switch.
+	lastTurnSteps int
+	sessionSteps  int
+
 	// input cursor blink
 	blinkCount int
 	blink      bool
@@ -646,7 +654,11 @@ type contextCompactedMsg struct {
 	freed      int
 	errStr     string
 }
-type promptDoneMsg struct{}
+type promptDoneMsg struct {
+	// steps is the finished prompt's kernel turn count (model↔tool round
+	// trips) from the response _meta; 0 when unknown (aborted, older peer).
+	steps int
+}
 type notifyClearMsg struct{}
 type flushViewportMsg struct{}
 type acpErrorMsg struct{ err error }
@@ -867,6 +879,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.inputQueue = append(m.inputQueue, text)
 					m.promptCount++
 					m.lastTurnRetries = 0
+					m.lastTurnSteps = 0
 					m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId, CreatedAt: time.Now()})
 					m.chatTextarea.SetValue("")
 					m.viewportDirty = true
@@ -890,6 +903,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.promptCount++
 					m.closeTrailingThought()
 					m.lastTurnRetries = 0
+					m.lastTurnSteps = 0
 					m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId, CreatedAt: time.Now()})
 					m.chatTextarea.SetValue("")
 					m.viewportDirty = true
@@ -898,6 +912,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				// User message → transcript, then async Prompt to ACP.
 				m.promptCount++
+				m.lastTurnRetries, m.lastTurnSteps = 0, 0
 				m.messages = append(m.messages, ChatMessage{
 					Role:      "user",
 					Content:   text,
@@ -1092,6 +1107,14 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.closeTrailingThought()
 		m.loading = false
 		m.statusText = ""
+		// The finished turn's kernel step count: shown on the turn-end
+		// marker (lastTurnSteps) and accumulated in the sidebar
+		// (sessionSteps). 0 = unknown (aborted / older peer) — accumulate
+		// nothing and leave the marker without a steps segment.
+		if msg.steps > 0 {
+			m.lastTurnSteps = msg.steps
+			m.sessionSteps += msg.steps
+		}
 		// Drain the input queue: send the oldest waiting message next.
 		if len(m.inputQueue) > 0 {
 			text := m.inputQueue[0]
@@ -1590,14 +1613,14 @@ func (m *Model) sendPrompt(text string) {
 		return
 	}
 	go func() {
-		_, err := sess.Prompt(ctx, openacp.PromptRequest{
+		resp, err := sess.Prompt(ctx, openacp.PromptRequest{
 			Prompt: []openacp.ContentBlock{{Type: "text", Text: text}},
 		})
 		if err != nil {
 			program.Send(acpErrorMsg{err: err})
 			return
 		}
-		program.Send(promptDoneMsg{})
+		program.Send(promptDoneMsg{steps: acpMetaInt(resp.Meta, "turn_count")})
 	}()
 }
 
@@ -1679,6 +1702,8 @@ func (m *Model) executeCommand(pc panelCommand) (tea.Model, tea.Cmd) {
 		m.renderSeq = 0
 		m.retry = nil
 		m.lastTurnRetries = 0
+		m.lastTurnSteps = 0
+		m.sessionSteps = 0
 		m.inputQueue = nil
 		m.pendingConfigSet = nil
 		m.usedTokens, m.contextSize, m.promptCount = 0, 0, 0
@@ -2038,6 +2063,7 @@ func (m *Model) execSelectedSession() (tea.Model, tea.Cmd) {
 	// The target session's own replay re-counts turns; usage waits for its
 	// first usage_update.
 	m.usedTokens, m.contextSize, m.promptCount = 0, 0, 0
+	m.lastTurnSteps, m.sessionSteps = 0, 0
 	m.loading = true
 	m.replaying = true
 	m.statusText = "Loading session..."
@@ -2540,6 +2566,15 @@ func (m *Model) turnEndMarkerRow(i int, msg ChatMessage, vpW int) string {
 		}
 		parts += muted.Render(formatThoughtDuration(d))
 		first = false
+	}
+	// Kernel steps for the finished turn (model↔tool round trips).
+	// Live-only like the retry count — replayed turns carry no per-turn
+	// step counts, so older markers simply omit the segment.
+	if m.lastTurnSteps > 0 {
+		if !first {
+			parts += sep
+		}
+		parts += muted.Render(fmt.Sprintf("%d steps", m.lastTurnSteps))
 	}
 	if m.lastTurnRetries > 0 {
 		if !first {

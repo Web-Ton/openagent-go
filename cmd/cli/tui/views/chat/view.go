@@ -448,12 +448,27 @@ func (m *Model) renderRight() string {
 	turnsTitle := background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("Turns")
 	turnsValue := background.Width(width - 1).Foreground(theme.TextAsh).Render(strconv.Itoa(m.promptCount))
 
+	// Session-cumulative kernel steps (model↔tool round trips), summed from
+	// the per-turn counts carried by prompt responses. Live turns only —
+	// replayed history carries no step counts, so the number restarts on
+	// session switch; hidden entirely until the first live turn lands.
+	var stepsLines []string
+	if m.sessionSteps > 0 {
+		stepsLines = []string{
+			background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("Steps"),
+			background.Width(width - 1).Foreground(theme.TextAsh).Render(strconv.Itoa(m.sessionSteps)),
+			"",
+		}
+	}
+
 	todoContent := m.renderPlanList(background, width-1)
 	headerParts := []string{
 		sessionTitle, sessionValue, "",
 	}
 	headerParts = append(headerParts, contextLines...)
-	headerParts = append(headerParts, "", turnsTitle, turnsValue, "", todoContent)
+	headerParts = append(headerParts, "", turnsTitle, turnsValue, "")
+	headerParts = append(headerParts, stepsLines...)
+	headerParts = append(headerParts, todoContent)
 	header := lipgloss.JoinVertical(lipgloss.Left, headerParts...)
 
 	workDirTitle := background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("WorkDir")
