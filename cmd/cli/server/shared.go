@@ -729,15 +729,41 @@ func (sw *settingsWatcher) reload(ctx context.Context) acp.ReloadResult {
 		slog.Warn("settings reload: cannot read file", "error", err)
 		return result
 	}
-	// Resolve env-var references before unmarshaling, identical to startup
-	// (main.go). Warnings (vars referenced without a default that are unset)
-	// are logged: a reload is debounced (500ms), so each intentional edit
-	// produces at most one warning per unset var — not spam. This matches
-	// startup behavior and surfaces misconfigured env refs introduced via
-	// hot-reload (e.g. a newly added ${NEW_VAR} that the operator forgot to
-	// export). Both sw.prev and newCfg end up expanded, so the
-	// reflect.DeepEqual diff below compares resolved values.
-	raw, reloadWarns := config.ExpandBytes(raw)
+	// ── Env hot-reload ──
+	// The env map (settings.json "env" field) is applied via os.Setenv
+	// BEFORE the final ExpandBytes so ${VAR} references resolve against
+	// the updated environment in the same reload pass.
+	//
+	// To extract the env map we NormalizeRawRefs (wraps raw-mode ${VAR}
+	// in sentinel-quoted strings so the JSON is valid) then unmarshal
+	// into a partial struct. This avoids a chicken-and-egg deadlock:
+	// raw-mode ${PORT} (e.g. {"port": ${PORT}}) with PORT defined only in
+	// the env map would fail JSON parse on the raw bytes → env reload
+	// never runs → PORT never gets Setenv → final expand also fails.
+	// NormalizeRawRefs makes the JSON parseable without expanding ${VAR},
+	// so the env map is extracted before Setenv runs.
+	diskRaw := raw
+	var envProbe struct {
+		Env map[string]string `json:"env,omitempty"`
+	}
+	json.Unmarshal(config.NormalizeRawRefs(diskRaw), &envProbe)
+	envChanged := false
+	for k, v := range envProbe.Env {
+		if old, ok := sw.prev.Env[k]; !ok || old != v {
+			os.Setenv(k, v)
+			envChanged = true
+		}
+	}
+	if envChanged {
+		result.Applied = append(result.Applied, "env vars updated")
+		slog.Info("settings reloaded: env vars updated")
+	}
+
+	// Final expansion: expand the ORIGINAL disk bytes with the updated
+	// environment. Warnings from this pass are the real ones — a var
+	// referenced without a default that is still unset after env reload
+	// is a genuine misconfiguration.
+	raw, reloadWarns := config.ExpandBytes(diskRaw)
 	for _, w := range reloadWarns {
 		slog.Warn("settings reload: env var referenced but not set", "var", w)
 	}
@@ -747,6 +773,7 @@ func (sw *settingsWatcher) reload(ctx context.Context) acp.ReloadResult {
 		slog.Warn("settings reload: parse failed, keeping previous config", "error", err)
 		return result
 	}
+
 	config.ApplyDefaults(&newCfg, sw.cfgPath)
 
 	// Validate-gated reload: if the new config introduces NEW enum violations

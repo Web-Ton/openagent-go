@@ -66,10 +66,11 @@ const settingsSchemaDoc = `CONFIG SCHEMA (hot-reloadable groups — object keys 
   "telemetry": {
     "endpoint": "localhost:4318",      // bare host:port OR full URL "http(s)://..."
     "protocol": "http",                // "http" (default) | "grpc"
-    "service_name": "openagent",
+    "service_name": "agent",           // OTel resource name; empty = binary name
     "insecure": true                   // bool; ignored when endpoint is a full URL
   },
-  "log": {"file": "...", "level": "info", "max_size": 10, "max_backups": 5, "max_age": 30}
+  "log": {"file": "...", "level": "info", "max_size": 10, "max_backups": 5, "max_age": 30},
+  "env": {"KEY1": "VALUE1", "KEY2": "VALUE2"}  // process env vars; hot-reloadable via os.Setenv
 }
 
 TYPE RULES (type-mismatched writes are REJECTED before save):
@@ -81,8 +82,8 @@ TYPE RULES (type-mismatched writes are REJECTED before save):
 - default_mode/tui.mode: "auto" | "manual" | "plan" (case-sensitive).
 - sandbox.network: "host" | "isolated" (case-sensitive).
 
-HOT-RELOAD (no restart): telemetry.*, log.level, provider.* (models), mcp_servers.*.
-RESTART-REQUIRED: sandbox.*, capabilities.*, embedding.*, openviking.*, context_providers.*, sensitive.*, channels.*, server.*, env, plugins, default_mode, tui.*.
+HOT-RELOAD (no restart): telemetry.*, log.level, provider.* (models), mcp_servers.*, env.
+RESTART-REQUIRED: sandbox.*, capabilities.*, embedding.*, openviking.*, context_providers.*, sensitive.*, channels.*, server.*, plugins, default_mode, tui.*.
 
 SECRETS: fields tagged sensitive (provider.*.api_key, channels.*.token/secret/app_secret, embedding.api_key, openviking.api_key). Prefer ${ENV_VAR} — disk stays literal, server resolves from env.
 
