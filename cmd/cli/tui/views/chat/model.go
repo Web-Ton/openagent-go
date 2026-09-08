@@ -1249,6 +1249,19 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusText = ""
 		m.needAutoScroll = true
 		m.viewportDirty = true
+		// A cold-start pick held pending (no session existed when the user
+		// chose a model/mode/thought level) applies to the first session
+		// that materializes — created or loaded alike.
+		if m.pendingConfigSet != nil {
+			pick := m.pendingConfigSet
+			m.pendingConfigSet = nil
+			if pick.id == "mode" {
+				m.mode = pick.value
+			} else {
+				m.setLocalConfigValue(pick.id, pick.value)
+			}
+			return m, tea.Batch(m.setConfigOptionCmd(pick.id, pick.value), m.notify("Session loaded"))
+		}
 		return m, m.notify("Session loaded")
 	case configOptionsMsg:
 		// Live sessionUpdate "config_option_update" and the cold-start
@@ -2185,8 +2198,15 @@ func (m *Model) execSelectedConfig() (tea.Model, tea.Cmd) {
 			m.statusText = "Backend not connected"
 			return m, nil
 		}
+		// No session yet: hold the pick — the badges already reflect it —
+		// and apply it when the first session materializes (lazy creation
+		// on the first prompt, or a /sessions load). Creating a session
+		// here left a zero-message row in /sessions whenever the user never
+		// chatted in it.
+		m.setLocalConfigValue(m.configPickerID, value)
 		m.pendingConfigSet = &configPick{id: m.configPickerID, value: value}
-		return m, m.newSessionCmd()
+		m.pendingModelsPanel = false
+		return m, nil
 	}
 	return m, m.setConfigOptionCmd(m.configPickerID, value)
 }
@@ -2211,8 +2231,14 @@ func (m *Model) execSelectedModel() (tea.Model, tea.Cmd) {
 			m.statusText = "Backend not connected"
 			return m, nil
 		}
+		// No session yet: hold the pick (badge feedback included) and apply
+		// it when the first session materializes (see execSelectedConfig —
+		// creating here left an empty row in /sessions whenever the user
+		// never chatted).
+		m.setLocalConfigValue("model", modelID)
 		m.pendingConfigSet = &configPick{id: "model", value: modelID}
-		return m, m.newSessionCmd()
+		m.pendingModelsPanel = false
+		return m, nil
 	}
 	if m.acpSession == nil {
 		m.statusText = "Backend not connected"
@@ -2229,6 +2255,19 @@ func (m *Model) modelOptions() []string {
 // currentModel returns the active model id, or "" when unknown.
 func (m *Model) currentModel() string {
 	return sessionConfigValue(m.configOptions, "model")
+}
+
+// setLocalConfigValue rewrites one option's CurrentValue in the cached
+// config options — optimistic badge/picker feedback for picks held pending
+// sessionlessly (the server copy lands via configSetMsg once a session
+// exists to apply to).
+func (m *Model) setLocalConfigValue(id, value string) {
+	for i := range m.configOptions {
+		if string(m.configOptions[i].ID) == id {
+			m.configOptions[i].CurrentValue = value
+			return
+		}
+	}
 }
 
 // currentThoughtLevel returns the active thought-strength setting from the

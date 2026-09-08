@@ -616,10 +616,12 @@ func TestConfigOptionsMsgErrClearsPendingModels(t *testing.T) {
 	}
 }
 
-// TestModelPickWithoutSessionCreatesThenSets guards the cold-start pick: a
-// model chosen from the session-less picker creates a session lazily and
-// applies the choice via set_config_option once the session lands.
-func TestModelPickWithoutSessionCreatesThenSets(t *testing.T) {
+// TestModelPickWithoutSessionHoldsPick guards the cold-start pick: a model
+// chosen from the session-less picker is held pending (badges reflect it)
+// and fires NO session creation — creating one there left zero-message rows
+// in /sessions. The pick applies via set_config_option once a session
+// materializes (lazy creation on the first prompt, or a /sessions load).
+func TestModelPickWithoutSessionHoldsPick(t *testing.T) {
 	m := newTestModel()
 	m.acpSession = testAcpSession(t)
 	m.configOptions = testModelOptions() // as cached by the list fetch
@@ -634,11 +636,18 @@ func TestModelPickWithoutSessionCreatesThenSets(t *testing.T) {
 	if m2.pendingConfigSet == nil || m2.pendingConfigSet.id != "model" || m2.pendingConfigSet.value != "m2" {
 		t.Errorf("pendingConfigSet = %+v, want model/m2", m2.pendingConfigSet)
 	}
-	if cmd == nil {
-		t.Fatal("picking without a session must fire the new-session command")
+	if cmd != nil {
+		t.Error("picking without a session must not create one")
 	}
-	// The session lands: the pending pick must turn into a set_config_option
-	// command (non-nil), and the transcript stays untouched.
+	if got := m2.currentModel(); got != "m2" {
+		t.Errorf("model badge = %q, want the held pick m2", got)
+	}
+	if m2.loading {
+		t.Error("a held pick must not enter the loading state")
+	}
+	// The session lands (first prompt or load): the pending pick must turn
+	// into a set_config_option command (non-nil), and the transcript stays
+	// untouched.
 	m3, setCmd := m2.Update(newSessionMsg{sessionID: "sess-boot", configOptions: testModelOptions()})
 	m4 := m3.(*Model)
 	if m4.pendingConfigSet != nil {
@@ -667,6 +676,44 @@ func TestNewSessionMsgErrClearsPendingModels(t *testing.T) {
 	}
 	if !strings.Contains(m2.statusText, "New session failed") {
 		t.Errorf("statusText = %q, want failure notice", m2.statusText)
+	}
+}
+
+// TestModePickHoldsUntilSessionLoad pins the config-pick side of the lazy
+// cold start: a session-less mode pick is held (no session created, badge
+// reflects it) and applies to the first session that appears — here via a
+// /sessions load, overriding the loaded session's own mode.
+func TestModePickHoldsUntilSessionLoad(t *testing.T) {
+	m := newTestModel()
+	m.acpSession = testAcpSession(t)
+	m.configOptions = sampleConfigOptions()
+	m.configPickerID = "mode"
+	m.panelOpen = true
+	m.panelMode = panelModeConfig
+	m.panelIdx = 0 // "auto" (current is manual)
+	upd, cmd := m.execSelectedConfig()
+	m2 := upd.(*Model)
+	if cmd != nil {
+		t.Error("a held mode pick must not create a session")
+	}
+	if m2.activeSessionID != "" || m2.pendingConfigSet == nil ||
+		m2.pendingConfigSet.id != "mode" || m2.pendingConfigSet.value != "auto" {
+		t.Fatalf("pick must be held pending: session=%q pick=%+v", m2.activeSessionID, m2.pendingConfigSet)
+	}
+	if m2.mode != "auto" {
+		t.Errorf("badge mode = %q, want the held pick auto", m2.mode)
+	}
+
+	m3, setCmd := m2.Update(sessionLoadedMsg{sessionID: "acp_loaded", mode: "manual"})
+	m4 := m3.(*Model)
+	if m4.pendingConfigSet != nil {
+		t.Error("pendingConfigSet must clear once applied to the loaded session")
+	}
+	if setCmd == nil {
+		t.Fatal("loading a session with a held pick must fire set_config_option")
+	}
+	if m4.mode != "auto" {
+		t.Errorf("mode = %q, want the pick to override the loaded session's manual", m4.mode)
 	}
 }
 
