@@ -129,7 +129,7 @@ func (m *Model) renderLeft(geom *viewGeom) string {
 		inputArea = m.renderPermissionPanel(m.getContentWidth()-1, 0)
 		vpHeight := m.chatViewport.Height()
 		sb := m.renderScrollbar(vpHeight)
-		scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.chatViewport.View(), m.renderScrollbarGap(vpHeight), sb)
+		scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.viewportView(), m.renderScrollbarGap(vpHeight), sb)
 		status := m.renderStatus()
 		// Blank separator between the transcript and the panel — the
 		// viewportHeight budget reserves one row for it (mirroring the
@@ -149,7 +149,7 @@ func (m *Model) renderLeft(geom *viewGeom) string {
 		splitH := m.chatViewport.Height()
 		ctxH := vpH - splitH
 		sb := m.renderScrollbar(splitH)
-		scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.chatViewport.View(), m.renderScrollbarGap(splitH), sb)
+		scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.viewportView(), m.renderScrollbarGap(splitH), sb)
 		ctxPane := m.renderSplitPane(ctxH)
 		inputArea = m.renderInput()
 		status := m.renderStatus()
@@ -162,7 +162,7 @@ func (m *Model) renderLeft(geom *viewGeom) string {
 	// Normal: full-height viewport + input + status.
 	vpHeight := m.chatViewport.Height()
 	sb := m.renderScrollbar(vpHeight)
-	scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.chatViewport.View(), m.renderScrollbarGap(vpHeight), sb)
+	scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.viewportView(), m.renderScrollbarGap(vpHeight), sb)
 	inputArea = m.renderInput()
 	status := m.renderStatus()
 	geom.inputTopY = vpH + 1 // viewport + blank row, split or not

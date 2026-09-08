@@ -4262,3 +4262,106 @@ func TestScrollbarDragGuards(t *testing.T) {
 		t.Fatalf("drag started below the track")
 	}
 }
+
+// TestBoxSelection drives the selection state machine: press anchors, held
+// motion extends, release copies the boxed text via OSC 52 and drops the
+// drag flag, the highlight survives scrolling (document coordinates), and
+// the next press starts over.
+func TestBoxSelection(t *testing.T) {
+	m := newTestModel()
+	for i := 0; i < 30; i++ {
+		m.messages = append(m.messages, ChatMessage{Role: "assistant", Content: "selection target line here"})
+	}
+	m.inChat = true
+	m.width, m.height = 120, 24
+	m.syncViewport()
+
+	// Press inside the transcript and drag right.
+	upd, _ := m.Update(tea.MouseClickMsg(tea.Mouse{X: 6, Y: 3, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if !m.selection.active {
+		t.Fatalf("press did not anchor a selection")
+	}
+	upd, _ = m.Update(tea.MouseMotionMsg(tea.Mouse{X: 20, Y: 4, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if !m.selectionSet() {
+		t.Fatalf("motion did not extend the selection")
+	}
+	upd, _ = m.Update(tea.MouseReleaseMsg(tea.Mouse{X: 20, Y: 4, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if m.selection.active {
+		t.Fatalf("release did not end the selection drag")
+	}
+	if !m.selectionSet() {
+		t.Fatalf("highlight must persist after release")
+	}
+
+	// The rendered viewport carries the selection background.
+	rendered := m.viewportView()
+	if !strings.Contains(rendered, "48;2;38;70;109m") {
+		t.Fatalf("selection background not rendered")
+	}
+
+	// Scrolling keeps the highlight glued to the text (doc coordinates).
+	yOff := m.chatViewport.YOffset()
+	m.chatViewport.ScrollUp(3)
+	m.needAutoScroll = false
+	m.syncViewport()
+	if m.chatViewport.YOffset() == yOff {
+		t.Fatalf("scroll did not move the window")
+	}
+	if !m.selectionSet() {
+		t.Fatalf("scroll cleared the selection")
+	}
+
+	// The next press starts a fresh (empty) selection.
+	upd, _ = m.Update(tea.MouseClickMsg(tea.Mouse{X: 4, Y: 2, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if m.selectionSet() {
+		t.Fatalf("press did not reset the previous selection")
+	}
+
+	// Copy: box a known span of a known row and check the extracted text.
+	m.chatViewport.SetYOffset(yOff)
+	m.syncViewport()
+	line := strings.Split(strings.Split(m.chatViewport.View(), "\n")[3], "\n")[0]
+	plain := utils.StripANSI(line)
+	if len(plain) < 20 {
+		t.Fatalf("unexpected short viewport row %q", plain)
+	}
+	upd, _ = m.Update(tea.MouseClickMsg(tea.Mouse{X: 6, Y: 3, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	upd, _ = m.Update(tea.MouseMotionMsg(tea.Mouse{X: 6 + 9, Y: 3, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	upd, cmd := m.Update(tea.MouseReleaseMsg(tea.Mouse{X: 6 + 9, Y: 3, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if cmd == nil {
+		t.Fatalf("release produced no copy command")
+	}
+	if want := plain[5:15]; m.selectedText() != want {
+		t.Fatalf("selectedText = %q, want %q", m.selectedText(), want)
+	}
+}
+
+// TestSelectionClearsOnContentChange guards the stale-coordinates fix: any
+// transcript content change drops the selection, since its document rows
+// shift underneath.
+func TestSelectionClearsOnContentChange(t *testing.T) {
+	m := newTestModel()
+	m.messages = []ChatMessage{{Role: "assistant", Content: "hello"}}
+	m.inChat = true
+	m.width, m.height = 120, 24
+	m.syncViewport()
+	upd, _ := m.Update(tea.MouseClickMsg(tea.Mouse{X: 6, Y: 2, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	upd, _ = m.Update(tea.MouseMotionMsg(tea.Mouse{X: 12, Y: 2, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if !m.selectionSet() {
+		t.Fatalf("selection not set")
+	}
+	upd, _ = m.markContentDirty()
+	m = upd.(*Model)
+	if m.selectionSet() || m.selection.active {
+		t.Fatalf("content change did not clear the selection")
+	}
+}

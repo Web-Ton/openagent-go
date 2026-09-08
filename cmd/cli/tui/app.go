@@ -157,5 +157,8 @@ func tuiColorMap(c config.TUIColors) map[string]string {
 	if c.LogoColor != "" {
 		m["logo_color"] = c.LogoColor
 	}
+	if c.SelectionBg != "" {
+		m["selection_bg"] = c.SelectionBg
+	}
 	return m
 }

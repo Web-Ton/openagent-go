@@ -7,6 +7,7 @@ package utils
 import (
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/mattn/go-runewidth"
 )
@@ -82,4 +83,163 @@ func UnifiedEndOfLine(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
 	return s
+}
+
+// sgrStateRe matches SGR sequences (the "m" flavor of CSI): plain resets
+// and parameterized styles.
+var sgrStateRe = regexp.MustCompile(`\x1b\[([0-9;]*)m`)
+
+// updateSGRState folds an SGR sequence into the accumulated parameter
+// string active since the last reset. A reset clears it; any other style
+// appends its parameters (the transcript's lipgloss output never emits
+// partial cancels like "39", so concatenation mirrors what the terminal
+// shows closely enough for cell repainting).
+func updateSGRState(active, seq string) string {
+	m := sgrStateRe.FindStringSubmatch(seq)
+	if m == nil {
+		return active
+	}
+	if m[1] == "" || m[1] == "0" {
+		return ""
+	}
+	if active == "" {
+		return m[1]
+	}
+	return active + ";" + m[1]
+}
+
+// sgrUnits splits an SGR parameter list into atomic units: single-parameter
+// attributes plus the multi-parameter color forms consumed whole —
+// "38;2;R;G;B" / "48;2;R;G;B" (truecolor) and "38;5;N" / "48;5;N" (256).
+// Filtering must happen per unit: dropping a bare "48" from
+// "38;2;…;48;2;R;G;B" would orphan the "2;R;G;B" tail and corrupt the
+// re-emitted sequence (the terminal then prints the stray terminator).
+func sgrUnits(params string) []string {
+	parts := strings.Split(params, ";")
+	var units []string
+	for i := 0; i < len(parts); i++ {
+		if parts[i] == "38" || parts[i] == "48" {
+			extra := 0
+			if i+1 < len(parts) && parts[i+1] == "2" {
+				extra = 4
+			} else if i+1 < len(parts) && parts[i+1] == "5" {
+				extra = 2
+			}
+			if extra > 0 {
+				end := min(i+extra, len(parts)-1)
+				units = append(units, strings.Join(parts[i:end+1], ";"))
+				i = end
+				continue
+			}
+		}
+		units = append(units, parts[i])
+	}
+	return units
+}
+
+// overlaySGR re-emits the accumulated style without any background unit
+// (48…/49), optionally replacing it with overlayCode.
+func overlaySGR(active string, withBg bool, overlayCode string) string {
+	var keep []string
+	if active != "" {
+		for _, u := range sgrUnits(active) {
+			if u == "49" || u == "48" || strings.HasPrefix(u, "48;") {
+				continue
+			}
+			keep = append(keep, u)
+		}
+	}
+	if withBg {
+		keep = append(keep, overlayCode)
+	}
+	if len(keep) == 0 {
+		return "\x1b[0m"
+	}
+	return "\x1b[0m\x1b[" + strings.Join(keep, ";") + "m"
+}
+
+// OverlayBackground repaints the display cells [from, to) of s with the
+// given SGR background code (e.g. "48;2;38;70;109"), keeping every cell's
+// existing foreground. ANSI sequences carry no cells; a wide (CJK) rune is
+// part of the range when its first cell is. Cells past the end of the
+// visible text are not conjured up — callers pass already padded rows.
+// Used by the transcript's box-selection highlight.
+func OverlayBackground(s string, from, to int, bgCode string) string {
+	if from >= to {
+		return s
+	}
+	// Accept both the bare parameter list ("48;2;38;70;109") and a full
+	// sequence ("\x1b[48;2;38;70;109m"): callers pass theme.ColorBgCode's
+	// output, and a full sequence appended to a rebuilt SGR would abort it
+	// mid-list (the wrapper's final "m" would print as a literal glyph).
+	bgCode = strings.TrimSuffix(strings.TrimPrefix(bgCode, "\x1b["), "m")
+	var b strings.Builder
+	b.Grow(len(s) + 32)
+	cell := 0
+	inSel := false
+	active := ""
+	rest := s
+	for rest != "" {
+		if rest[0] == '\x1b' {
+			loc := ansiRe.FindStringIndex(rest)
+			if loc == nil || loc[0] != 0 {
+				// Unknown escape byte (OSC, incomplete CSI): pass it
+				// through and keep walking — the next bytes re-enter the
+				// normal rune/sequence handling.
+				b.WriteByte(rest[0])
+				rest = rest[1:]
+				continue
+			}
+			seq := rest[:loc[1]]
+			active = updateSGRState(active, seq)
+			b.WriteString(seq)
+			rest = rest[loc[1]:]
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(rest)
+		w := runewidth.RuneWidth(r)
+		want := cell >= from && cell < to
+		if want != inSel {
+			b.WriteString(overlaySGR(active, want, bgCode))
+			inSel = want
+		}
+		b.WriteRune(r)
+		cell += w
+		rest = rest[size:]
+	}
+	if inSel {
+		b.WriteString("\x1b[0m")
+	}
+	return b.String()
+}
+
+// PlainCells returns the plain (ANSI-stripped) text of display cells
+// [from, to) of s, collecting whole runes (a wide rune joins the output
+// when its first cell is in range). Used to copy a box-selected span.
+func PlainCells(s string, from, to int) string {
+	var b strings.Builder
+	cell := 0
+	rest := s
+	for rest != "" {
+		if rest[0] == '\x1b' {
+			loc := ansiRe.FindStringIndex(rest)
+			if loc == nil || loc[0] != 0 {
+				rest = rest[1:]
+				continue
+			}
+			rest = rest[loc[1]:]
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(rest)
+		w := runewidth.RuneWidth(r)
+		if cell >= from && cell < to {
+			b.WriteRune(r)
+		}
+		cell += w
+		rest = rest[size:]
+		if cell >= to {
+			break
+		}
+	}
+	return b.String()
 }

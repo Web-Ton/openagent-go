@@ -42,7 +42,9 @@ func (m *Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		if m.startScrollbarDrag(msg.X, msg.Y) {
 			return m, nil
 		}
-		// Transcript box selection anchors on this press (selection.go).
+		if msg.Y < m.chatViewport.Height() {
+			m.startSelection(msg.X, msg.Y)
+		}
 	}
 	return m, nil
 }
@@ -82,8 +84,11 @@ func (m *Model) startScrollbarDrag(x, y int) bool {
 func (m *Model) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
 	if m.sbarDrag && msg.Button == tea.MouseLeft {
 		m.dragScrollbarTo(msg.Y)
+		return m, nil
 	}
-	// Selection extension hooks in here while a box select is active.
+	if m.selection.active && msg.Button == tea.MouseLeft {
+		m.extendSelection(msg.X, msg.Y)
+	}
 	return m, nil
 }
 
@@ -107,11 +112,17 @@ func (m *Model) dragScrollbarTo(y int) {
 	}
 }
 
-// handleMouseRelease ends the active drag. The selection copy also lands
-// here on left release.
+// handleMouseRelease ends the active drag. A released box selection copies
+// its text via OSC 52.
 func (m *Model) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.Cmd) {
-	if m.sbarDrag && msg.Button == tea.MouseLeft {
+	if msg.Button != tea.MouseLeft {
+		return m, nil
+	}
+	if m.sbarDrag {
 		m.sbarDrag = false
+	}
+	if m.selection.active {
+		return m.finishSelection()
 	}
 	return m, nil
 }

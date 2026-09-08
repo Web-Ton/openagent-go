@@ -138,6 +138,9 @@ type Model struct {
 	sbarDrag bool
 	sbarGrab int
 
+	// selection is the transcript's in-app box selection (see selection.go).
+	selection selectionFields
+
 	// compacting is true while a /compact control round-trip is in flight.
 	// The agent's slash registry intercepts the text and compacts the
 	// history; the round-trip never enters the conversation store (nor the
@@ -1567,6 +1570,10 @@ func (m *Model) trimMessageStore() {
 // instead of re-rendering the whole viewport on every chunk. Discrete,
 // non-streaming changes flush immediately.
 func (m *Model) markContentDirty() (tea.Model, tea.Cmd) {
+	// Transcript content changed: doc rows shifted under any existing box
+	// selection, so the highlight (anchored to doc coordinates) would paint
+	// the wrong text — drop it.
+	m.clearSelection()
 	if !m.loading {
 		m.renderPending = false
 		m.viewportDirty = true

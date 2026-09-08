@@ -77,3 +77,59 @@ func TestUnifiedEndOfLine(t *testing.T) {
 		t.Errorf("UnifiedEndOfLine(%q) = %q", in, got)
 	}
 }
+
+func TestOverlayBackground(t *testing.T) {
+	bg := "48;2;38;70;109"
+	// Plain ASCII: exactly the range gets the background, the rest untouched.
+	got := OverlayBackground("hello world", 6, 11, bg)
+	if want := "hello \x1b[0m\x1b[" + bg + "mworld\x1b[0m"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	// Zero-width range returns the input unchanged.
+	if got := OverlayBackground("abc", 2, 2, bg); got != "abc" {
+		t.Fatalf("empty range changed the input: %q", got)
+	}
+	// Existing foreground styling survives inside the range and is restored
+	// after it.
+	styled := "a\x1b[31mred\x1b[0mrest"
+	got = OverlayBackground(styled, 1, 4, bg)
+	want := "a\x1b[31m\x1b[0m\x1b[31;" + bg + "mred\x1b[0m\x1b[0mrest"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	// A combined fg+bg sequence (lipgloss emits one SGR with both) keeps its
+	// foreground whole when the background is swapped: the "48;2;R;G;B"
+	// tail must go as a unit, leaving no orphaned "2;R;G;B" subparams.
+	combined := "\x1b[38;2;253;252;252;48;2;0;0;0mtext"
+	got = OverlayBackground(combined, 0, 4, bg)
+	want = "\x1b[38;2;253;252;252;48;2;0;0;0m\x1b[0m\x1b[38;2;253;252;252;" + bg + "mtext\x1b[0m"
+	if got != want {
+		t.Fatalf("combined fg+bg: got %q, want %q", got, want)
+	}
+	// The style must survive re-emission intact after the range ends too.
+	got = OverlayBackground(combined+"\x1b[0mpad", 1, 2, bg)
+	if strings.Contains(got, "2;0;0;0;") {
+		t.Fatalf("orphaned truecolor subparams leaked into %q", got)
+	}
+	// A wide (CJK) rune joins the selection when its first cell is inside.
+	got = OverlayBackground("中文", 0, 1, bg) // 中 occupies cells 0-1
+	if !strings.Contains(got, bg) {
+		t.Fatalf("wide rune not painted when the range covers its first cell: %q", got)
+	}
+	got = OverlayBackground("中文", 1, 2, bg) // boundary inside 中
+	if strings.Contains(got, bg) {
+		t.Fatalf("wide rune painted on a mid-rune boundary: %q", got)
+	}
+}
+
+func TestPlainCells(t *testing.T) {
+	// ANSI styling is stripped; the cell range applies to visible columns.
+	got := PlainCells("\x1b[31mabc\x1b[0mdef", 2, 5)
+	if got != "cde" {
+		t.Fatalf("got %q, want %q", got, "cde")
+	}
+	// Wide runes come out whole.
+	if got := PlainCells("中文", 0, 1); got != "中" {
+		t.Fatalf("got %q, want 中", got)
+	}
+}

@@ -87,7 +87,8 @@ type TUIColors struct {
 	TextNormal  string `json:"text_normal,omitempty"`
 	TextAsh     string `json:"text_ash,omitempty"`
 	BorderGray  string `json:"border_gray,omitempty"`
-	LogoColor   string `json:"logo_color,omitempty"` // welcome-page logo
+	LogoColor   string `json:"logo_color,omitempty"`   // welcome-page logo
+	SelectionBg string `json:"selection_bg,omitempty"` // transcript box-selection highlight
 }
 
 // TelemetryConfig configures OpenTelemetry trace export.
