@@ -638,9 +638,12 @@ func (s *AgentServer) SetEmbedding(baseURL, apiKey, model string) {
 	}
 }
 
-// modelIDs returns the registered model ids under modelsMu. SetModel
+// modelIDs returns the registered model ids under modelsMu, sorted. SetModel
 // (wasm runtime_set_model_config) can insert concurrently from a tool
-// goroutine, so all iterations must go through this helper.
+// goroutine, so all iterations must go through this helper. Sorting keeps
+// the /models panel and config options deterministic — map iteration order
+// is randomized per call, which shuffled the list between opens. Same order
+// firstModelIDLocked uses for the default fallback.
 func (s *AgentServer) ModelIDs() []string {
 	s.modelsMu.Lock()
 	defer s.modelsMu.Unlock()
@@ -648,6 +651,7 @@ func (s *AgentServer) ModelIDs() []string {
 	for id := range s.Models {
 		ids = append(ids, id)
 	}
+	sort.Strings(ids)
 	return ids
 }
 
