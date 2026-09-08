@@ -2,11 +2,13 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"image/color"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -60,6 +62,12 @@ type Model struct {
 	focus FocusArea
 
 	activeSessionID string
+
+	// sessionTitle is the active session's human title (server-generated
+	// after the first exchange, pushed via session_info_update; also carried
+	// from the /sessions picker on switch). Empty until known — the sidebar
+	// falls back to the raw session id.
+	sessionTitle string
 
 	// inChat controls welcome vs chat view. Set true on first Enter so the
 	// view switches immediately without waiting for the ACP session ID.
@@ -123,6 +131,29 @@ type Model struct {
 
 	needAutoScroll bool
 
+	// compacting is true while a /compact control round-trip is in flight.
+	// The agent's slash registry intercepts the text and compacts the
+	// history; the round-trip never enters the conversation store (nor the
+	// LLM), so its textual echo is suppressed — the two-state compact block
+	// in the transcript is the display.
+	compacting bool
+	// retry is set while the kernel backs off between model attempts; it
+	// renders the transient retry divider and clears on the next streamed
+	// content (the model is producing again) or at turn end.
+	retry *retryState
+	// lastTurnRetries counts the retries of the most recent turn; the
+	// turn-end info row appends "N retries" from it. Reset when the next
+	// prompt is appended — client-side diagnostics only.
+	lastTurnRetries int
+
+	// lastTurnSteps is the finished turn's kernel step count (model↔tool
+	// round trips, from the prompt response _meta.turn_count); 0 while the
+	// turn runs or when unknown. sessionSteps accumulates the known counts
+	// over the session — live turns only (replayed history carries no
+	// per-turn step counts), so it restarts on session switch.
+	lastTurnSteps int
+	sessionSteps  int
+
 	// input cursor blink
 	blinkCount int
 	blink      bool
@@ -180,7 +211,9 @@ type Model struct {
 	// re-styles only the chunk that changed, and toggles/width changes are
 	// picked up by the fingerprint. Keyed by message index; entries are
 	// dropped automatically once they exceed the message count.
-	renderCache map[int]renderCacheEntry
+	renderCache map[int64]renderCacheEntry
+	// renderSeq hands out ChatMessage.Seq identities (see ChatMessage.Seq).
+	renderSeq int64
 
 	// fedOffset/fedHeight remember the window the viewport content was last
 	// built for, so the virtual scroll refeeds (styling newly revealed
@@ -301,6 +334,7 @@ const (
 	actionTheme
 	actionPlugins
 	actionSplit
+	actionCompact
 )
 
 // panelCommand is a slash-command entry for the command panel.
@@ -310,33 +344,50 @@ type panelCommand struct {
 	action  cmdAction
 	enabled bool
 	space   bool // toggles with the space key when the filter is empty
+	panel   bool // listed in the command panel; false keeps it typed-only
 }
 
 // allPanelCommands is the static command registry. Commands whose
 // functionality has not landed yet stay out of the list entirely (parked:
 // /update_skills is still the "not implemented" stub, /plugins only listed
 // a directory nothing consumes) — re-enable by adding a line here; the
-// executeCommand handlers are kept.
+// executeCommand handlers are kept. The /toggle_* family is registered but
+// deliberately kept out of the command panel (panel: false): the visibility
+// toggles stay typed-runnable without cluttering the picker.
 func allPanelCommands() []panelCommand {
 	return []panelCommand{
-		{"/sessions", "Switch session", actionSessions, true, false},
-		{"/new", "New session", actionNew, true, false},
-		{"/models", "Switch model", actionModels, true, false},
-		{"/toggle_mode", "Switch mode", actionToggleMode, true, false},
-		{"/thought_level", "Switch thought level", actionThoughtLevel, true, false},
-		{"/toggle_thinking", "Expand thinking content", actionToggleThinking, true, true},
-		{"/toggle_skill", "Toggle skill tools", actionToggleSkill, true, true},
-		{"/toggle_shell", "Toggle shell tools", actionToggleShell, true, true},
-		{"/toggle_toolcall", "Toggle tool call detail", actionToggleToolDetail, true, true},
-		{"/toggle_linenumbers", "Toggle input line numbers", actionToggleLineNumbers, true, true},
-		{"/help", "Show help", actionHelp, true, false},
-		{"/search", "Search transcript", actionSearch, true, false},
-		{"/export", "Export transcript to Markdown", actionExport, true, false},
-		{"/edit", "Edit a past user message", actionEdit, true, false},
-		{"/theme", "Cycle color theme", actionTheme, true, true},
-		{"/split", "Toggle split view", actionSplit, true, false},
-		{"/exit", "Exit the app", actionExit, true, false},
+		{"/sessions", "Switch session", actionSessions, true, false, true},
+		{"/new", "New session", actionNew, true, false, true},
+		{"/models", "Switch model", actionModels, true, false, true},
+		// /toggle_mode stays listed: switching modes is a primary action,
+		// unlike the visibility toggles below it (typed-runnable only).
+		{"/toggle_mode", "Switch mode", actionToggleMode, true, false, true},
+		{"/thought_level", "Switch thought level", actionThoughtLevel, true, false, true},
+		{"/compact", "Compact session context", actionCompact, true, false, true},
+		{"/toggle_thinking", "Expand thinking content", actionToggleThinking, true, true, false},
+		{"/toggle_skill", "Toggle skill tools", actionToggleSkill, true, true, false},
+		{"/toggle_shell", "Toggle shell tools", actionToggleShell, true, true, false},
+		{"/toggle_toolcall", "Toggle tool call detail", actionToggleToolDetail, true, true, false},
+		{"/toggle_linenumbers", "Toggle input line numbers", actionToggleLineNumbers, true, true, false},
+		{"/help", "Show help", actionHelp, true, false, true},
+		{"/search", "Search transcript", actionSearch, true, false, true},
+		{"/export", "Export transcript to Markdown", actionExport, true, false, true},
+		{"/edit", "Edit a past user message", actionEdit, true, false, true},
+		{"/theme", "Cycle color theme", actionTheme, true, true, true},
+		{"/split", "Toggle split view", actionSplit, true, false, true},
+		{"/exit", "Exit the app", actionExit, true, false, true},
 	}
+}
+
+// registeredSlash reports whether slash names a registered command, even one
+// kept out of the command panel (the /toggle_* family stays typed-runnable).
+func registeredSlash(slash string) bool {
+	for _, pc := range allPanelCommands() {
+		if pc.slash == slash {
+			return true
+		}
+	}
+	return false
 }
 
 // toggleIcon reports the ○/● state for a toggle command.
@@ -368,6 +419,12 @@ type ChatMessage struct {
 	Content string
 	TurnId  int64
 
+	// Wall-clock when this message arrived (live: stamped on arrival, the
+	// last chunk of a streaming message wins; replay: parsed from the stored
+	// row's created_at over the wire). Zero on legacy replayed rows. It
+	// timestamps the end of the turn when set on a turn's last message.
+	CreatedAt time.Time
+
 	// thought timing (Role == "thought"): ThoughtStart is stamped when the
 	// first chunk arrives, ThoughtEnd when thinking gives way to another
 	// message or the turn finishes. Zero values mean the span is unknown —
@@ -378,13 +435,33 @@ type ChatMessage struct {
 	// tool-call messages (Role == "tool")
 	ToolCallID string
 	ToolName   string
-	ToolStatus string // "running" | "done" | "failed"
+	ToolStatus string // "pending" | "running" | "done" | "failed"
 	ToolInput  string
 	ToolOutput string
+
+	// context-compaction block (Role == "compact"): rendered like the
+	// thought line, two states — "Compacting context..." while running,
+	// then a settled outcome line with duration (or the failure reason).
+	// Driven by the context_compacting / context_compacted session updates;
+	// compaction is never persisted, so the block only exists in the live
+	// transcript.
+	CompactStart  time.Time
+	CompactEnd    time.Time // zero while running
+	CompactedMsgs int
+	FreedTokens   int
+	CompactError  string
+
+	// Seq is a model-scoped identity assigned on first render. The render
+	// cache keys on it: a transcript at the in-memory cap drops its oldest
+	// rows on every append, which shifts all slice indices — an index key
+	// invalidates the whole cache per streamed chunk (a full multi-MB
+	// restyle), while the seq rides stably through the shift.
+	Seq int64
 }
 
 // tool status markers rendered in the transcript.
 const (
+	toolPending = "pending" // announced, not yet approved to run
 	toolRunning = "running"
 	toolDone    = "done"
 	toolFailed  = "failed"
@@ -415,7 +492,7 @@ func NewModel(ctx context.Context, cancel context.CancelFunc, workDir, ver, mode
 
 	// viewport (transcript scroll area)
 	vp := viewport.New()
-	vp.SetWidth(layout.GetViewWidth(defaultWidth))
+	vp.SetWidth(layout.GetTranscriptWidth(defaultWidth))
 	vp.SetHeight(layout.GetViewHeight(defaultHeight))
 	vp.FillHeight = true
 	vp.Style = theme.BaseStyle()
@@ -496,14 +573,13 @@ func NewModel(ctx context.Context, cancel context.CancelFunc, workDir, ver, mode
 		tips:       components.NextHelpTip(),
 		suggestion: suggestion,
 
-		// Transcript visibility defaults: thought cards are collapsed to a
-		// one-line summary (Thinking... / Thought for Ns) until
-		// /toggle_thinking expands them; skill/shell rows and tool details
-		// are shown until toggled off (the palette icons start ●).
+		// Transcript visibility defaults: thought cards collapse to a one-line
+		// summary (Thinking... / Thought for Ns) and tool rows show the call
+		// line only — both expand via /toggle_thinking and /toggle_toolcall;
+		// skill/shell rows stay visible until toggled off.
 		visibleConfig: components.VisibleConfig{
-			ShowToolSkill:  true,
-			ShowToolShell:  true,
-			ShowToolDetail: true,
+			ShowToolSkill: true,
+			ShowToolShell: true,
 		},
 
 		// Permission policy is persisted; the safe default is ask.
@@ -541,9 +617,48 @@ type acpReadyMsg struct {
 	sessionID     string
 	configOptions []openacp.SessionConfigOption
 }
-type agentMessageMsg struct{ text string }
-type agentThoughtMsg struct{ text string }
-type promptDoneMsg struct{}
+type agentMessageMsg struct {
+	text      string
+	createdAt time.Time // from replay _meta; zero on live streams (stamp on arrival)
+}
+type agentThoughtMsg struct {
+	text      string
+	createdAt time.Time
+}
+type contextCompactingMsg struct{ totalMessages int }
+
+// sessionInfoMsg — sessionUpdate "session_info_update": the server set or
+// renamed the session's title (generated after the first exchange).
+type sessionInfoMsg struct{ title string }
+
+// retryingMsg — sessionUpdate "model_retrying": the model call hit a
+// transient error and the kernel backs off before the next attempt.
+// Turn-scoped transient state: never stored, never replayed.
+type retryingMsg struct {
+	attempt   int           // 1-based: the upcoming attempt
+	max       int           // retry ceiling (kernel callModel)
+	delay     time.Duration // this attempt's backoff (Retry-After aware)
+	errStr    string
+	startedAt time.Time
+}
+
+// retryState drives the transient retry divider at the transcript tail.
+type retryState struct {
+	attempt, max int
+	delay        time.Duration
+	startedAt    time.Time
+	err          string
+}
+type contextCompactedMsg struct {
+	compressed int
+	freed      int
+	errStr     string
+}
+type promptDoneMsg struct {
+	// steps is the finished prompt's kernel turn count (model↔tool round
+	// trips) from the response _meta; 0 when unknown (aborted, older peer).
+	steps int
+}
 type notifyClearMsg struct{}
 type flushViewportMsg struct{}
 type acpErrorMsg struct{ err error }
@@ -555,7 +670,10 @@ type newSessionMsg struct {
 	mode          string
 	err           error
 }
-type userMessageMsg struct{ text string }
+type userMessageMsg struct {
+	text      string
+	createdAt time.Time // from replay _meta; zero on live streams
+}
 type planMsg struct{ entries []openacp.PlanEntry }
 type loadSessionsMsg struct {
 	items []sessionItem
@@ -563,6 +681,7 @@ type loadSessionsMsg struct {
 }
 type sessionLoadedMsg struct {
 	sessionID     string
+	title         string // from the /sessions picker item; empty on other paths
 	configOptions []openacp.SessionConfigOption
 	mode          string
 	err           error
@@ -582,6 +701,8 @@ type toolCallMsg struct {
 	status string
 	input  string
 	output string
+
+	createdAt time.Time // from replay _meta; zero on live streams
 }
 type permissionRequestMsg struct {
 	req     openacp.RequestPermissionRequest
@@ -656,6 +777,15 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.permissionReq = &msg.req
 		m.permissionReplyCh = msg.replyCh
 		m.permissionSelectedIdx = 0
+		m.viewportDirty = true
+		return m, nil
+
+	case retryingMsg:
+		m.retry = &retryState{
+			attempt: msg.attempt, max: msg.max, delay: msg.delay,
+			startedAt: msg.startedAt, err: msg.errStr,
+		}
+		m.lastTurnRetries = msg.attempt
 		m.viewportDirty = true
 		return m, nil
 
@@ -748,7 +878,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.updateInputWidth() // welcome box is narrower than chat; re-fit on page switch
 					m.inputQueue = append(m.inputQueue, text)
 					m.promptCount++
-					m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId})
+					m.lastTurnRetries = 0
+					m.lastTurnSteps = 0
+					m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId, CreatedAt: time.Now()})
 					m.chatTextarea.SetValue("")
 					m.viewportDirty = true
 					if len(m.inputQueue) == 1 {
@@ -770,7 +902,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.inputQueue = append(m.inputQueue, text)
 					m.promptCount++
 					m.closeTrailingThought()
-					m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId})
+					m.lastTurnRetries = 0
+					m.lastTurnSteps = 0
+					m.messages = append(m.messages, ChatMessage{Role: "user", Content: text, TurnId: m.turnId, CreatedAt: time.Now()})
 					m.chatTextarea.SetValue("")
 					m.viewportDirty = true
 					m.statusText = fmt.Sprintf("[Queued:%d] waiting for the agent...", len(m.inputQueue))
@@ -778,10 +912,12 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				// User message → transcript, then async Prompt to ACP.
 				m.promptCount++
+				m.lastTurnRetries, m.lastTurnSteps = 0, 0
 				m.messages = append(m.messages, ChatMessage{
-					Role:    "user",
-					Content: text,
-					TurnId:  m.turnId,
+					Role:      "user",
+					Content:   text,
+					TurnId:    m.turnId,
+					CreatedAt: time.Now(),
 				})
 				m.chatTextarea.SetValue("")
 				m.viewportDirty = true
@@ -897,6 +1033,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// ── ACP streaming events ──
 	case acpReadyMsg:
 		m.activeSessionID = msg.sessionID
+		m.sessionTitle = ""
 		if msg.configOptions != nil {
 			m.configOptions = msg.configOptions
 			// Adopt the mode option so the header badge matches the server's
@@ -914,17 +1051,26 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case agentMessageMsg:
+		m.retry = nil
+		if m.compacting {
+			// /compact round-trip's textual echo: suppressed — the compact
+			// block in the transcript already carries the outcome.
+			return m, nil
+		}
 		m.closeTrailingThought()
 		if n := len(m.messages); n > 0 && m.messages[n-1].Role == "assistant" && m.messages[n-1].TurnId == m.turnId {
 			m.messages[n-1].Content += msg.text
+			m.messages[n-1].CreatedAt = m.stampACPMeta(msg.createdAt)
 		} else {
-			m.messages = append(m.messages, ChatMessage{Role: "assistant", Content: msg.text, TurnId: m.turnId})
+			m.messages = append(m.messages, ChatMessage{Role: "assistant", Content: msg.text, TurnId: m.turnId, CreatedAt: m.stampACPMeta(msg.createdAt)})
 		}
 		m.trimMessageStore()
 		return m.markContentDirty()
 	case agentThoughtMsg:
+		m.retry = nil
 		if n := len(m.messages); n > 0 && m.messages[n-1].Role == "thought" && m.messages[n-1].TurnId == m.turnId {
 			m.messages[n-1].Content += msg.text
+			m.messages[n-1].CreatedAt = m.stampACPMeta(msg.createdAt)
 		} else {
 			start := time.Now()
 			if m.replaying {
@@ -932,7 +1078,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// timestamps zero so the collapsed card stays undated.
 				start = time.Time{}
 			}
-			m.messages = append(m.messages, ChatMessage{Role: "thought", Content: msg.text, TurnId: m.turnId, ThoughtStart: start})
+			m.messages = append(m.messages, ChatMessage{Role: "thought", Content: msg.text, TurnId: m.turnId, ThoughtStart: start, CreatedAt: m.stampACPMeta(msg.createdAt)})
 		}
 		m.trimMessageStore()
 		return m.markContentDirty()
@@ -949,9 +1095,26 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case promptDoneMsg:
+		m.retry = nil
+		if m.compacting {
+			// /compact round-trip finished: the compact block already shows
+			// the outcome, nothing more to surface.
+			m.compacting = false
+			m.loading = false
+			m.statusText = ""
+			return m, nil
+		}
 		m.closeTrailingThought()
 		m.loading = false
 		m.statusText = ""
+		// The finished turn's kernel step count: shown on the turn-end
+		// marker (lastTurnSteps) and accumulated in the sidebar
+		// (sessionSteps). 0 = unknown (aborted / older peer) — accumulate
+		// nothing and leave the marker without a steps segment.
+		if msg.steps > 0 {
+			m.lastTurnSteps = msg.steps
+			m.sessionSteps += msg.steps
+		}
 		// Drain the input queue: send the oldest waiting message next.
 		if len(m.inputQueue) > 0 {
 			text := m.inputQueue[0]
@@ -969,6 +1132,37 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.usedTokens = msg.used
 		}
 		return m, nil
+	case sessionInfoMsg:
+		// Sidebar shows the session's human title once the server sets one.
+		if msg.title != "" {
+			m.sessionTitle = msg.title
+		}
+		return m, nil
+	case contextCompactingMsg:
+		// History compaction started (auto, or manual /compact): open the
+		// two-state compact block. Idempotent — a round-trip emits the
+		// update once per pass.
+		if n := len(m.messages); n > 0 && m.messages[n-1].Role == "compact" && m.messages[n-1].CompactEnd.IsZero() {
+			return m, nil
+		}
+		m.messages = append(m.messages, ChatMessage{Role: "compact", TurnId: m.turnId, CompactStart: time.Now()})
+		m.trimMessageStore()
+		return m.markContentDirty()
+	case contextCompactedMsg:
+		// Compaction finished: close the open compact block with the
+		// outcome and stamp the end time for the duration display.
+		for i := len(m.messages) - 1; i >= 0; i-- {
+			prev := &m.messages[i]
+			if prev.Role != "compact" || !prev.CompactEnd.IsZero() {
+				continue
+			}
+			prev.CompactEnd = time.Now()
+			prev.CompactedMsgs = msg.compressed
+			prev.FreedTokens = msg.freed
+			prev.CompactError = msg.errStr
+			return m.markContentDirty()
+		}
+		return m, nil
 	case modeUpdateMsg:
 		if msg.mode != "" {
 			m.mode = msg.mode
@@ -984,6 +1178,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.activeSessionID = msg.sessionID
+		m.sessionTitle = "" // fresh session: title arrives via session_info_update
 		if msg.configOptions != nil {
 			m.configOptions = msg.configOptions
 		}
@@ -1042,7 +1237,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.promptCount++
-		m.messages = append(m.messages, ChatMessage{Role: "user", Content: msg.text, TurnId: m.turnId})
+		m.messages = append(m.messages, ChatMessage{Role: "user", Content: msg.text, TurnId: m.turnId, CreatedAt: m.stampACPMeta(msg.createdAt)})
 		m.trimMessageStore()
 		m.viewportDirty = true
 		return m, nil
@@ -1067,6 +1262,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.activeSessionID = msg.sessionID
+		m.sessionTitle = msg.title
 		if msg.configOptions != nil {
 			m.configOptions = msg.configOptions
 		}
@@ -1076,6 +1272,19 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusText = ""
 		m.needAutoScroll = true
 		m.viewportDirty = true
+		// A cold-start pick held pending (no session existed when the user
+		// chose a model/mode/thought level) applies to the first session
+		// that materializes — created or loaded alike.
+		if m.pendingConfigSet != nil {
+			pick := m.pendingConfigSet
+			m.pendingConfigSet = nil
+			if pick.id == "mode" {
+				m.mode = pick.value
+			} else {
+				m.setLocalConfigValue(pick.id, pick.value)
+			}
+			return m, tea.Batch(m.setConfigOptionCmd(pick.id, pick.value), m.notify("Session loaded"))
+		}
 		return m, m.notify("Session loaded")
 	case configOptionsMsg:
 		// Live sessionUpdate "config_option_update" and the cold-start
@@ -1126,6 +1335,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.output != "" {
 				m.messages[i].ToolOutput = msg.output
 			}
+			if !msg.createdAt.IsZero() {
+				m.messages[i].CreatedAt = msg.createdAt
+			}
 			return m.markContentDirty()
 		}
 		m.closeTrailingThought()
@@ -1137,18 +1349,31 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ToolStatus: msg.status,
 			ToolInput:  msg.input,
 			ToolOutput: msg.output,
+			CreatedAt:  m.stampACPMeta(msg.createdAt),
 		})
 		m.trimMessageStore()
 		return m.markContentDirty()
 	case acpErrorMsg:
+		if m.compacting {
+			// A failed /compact round-trip: restore idle state and surface
+			// the error through the normal error path below.
+			m.compacting = false
+			m.loading = false
+			m.statusText = ""
+		}
 		m.closeTrailingThought()
-		m.messages = append(m.messages, ChatMessage{Role: "error", Content: msg.err.Error()})
+		m.messages = append(m.messages, ChatMessage{Role: "error", Content: msg.err.Error(), CreatedAt: time.Now()})
 		m.loading = false
 		m.viewportDirty = true
 		return m, nil
 
 	case spinnerTickMsg:
 		m.spinner = m.spinner.Tick()
+		if m.retry != nil {
+			// Retry divider shows a next-attempt countdown: refeed the
+			// document so the seconds tick down.
+			m.viewportDirty = true
+		}
 		return m, spinnerTick()
 
 	case blinkTickMsg:
@@ -1204,6 +1429,8 @@ func (m *Model) respondPermission(idx int) {
 	m.permissionReplyCh <- resp
 	m.permissionReq = nil
 	m.permissionReplyCh = nil
+	// The dialog closing unhides the pending tool rows it was suppressing.
+	m.viewportDirty = true
 }
 
 // escPressed implements Esc outside the permission dialog: it clears the
@@ -1233,11 +1460,18 @@ func (m *Model) cancelPrompt() {
 
 // ── slash commands & command panel ──
 
-// buildPanelCommands returns the filtered command list for the panel,
-// honouring the current filter and per-command enabled state.
+// buildPanelCommands returns the filtered command list for the open panel,
+// honouring the current filter and per-command enabled state. The two panels
+// differ in scope: the Ctrl+P palette lists every registered command, while
+// the "/"-docked sheet lists the curated subset — the visibility toggles
+// (/toggle_thinking and friends) stay typed-runnable without cluttering the
+// sheet.
 func (m *Model) buildPanelCommands() []panelCommand {
 	var out []panelCommand
 	for _, pc := range allPanelCommands() {
+		if !pc.panel && m.panelFromSlash {
+			continue
+		}
 		if m.panelFilter != "" &&
 			!strings.HasPrefix(pc.slash, m.panelFilter) &&
 			!strings.Contains(pc.slash, m.panelFilter) {
@@ -1257,7 +1491,7 @@ func (m *Model) commandEnabled(pc panelCommand) bool {
 		return false
 	}
 	switch pc.action {
-	case actionSessions, actionModels, actionNew:
+	case actionSessions, actionModels, actionNew, actionCompact:
 		return m.acpSession != nil
 	}
 	return true
@@ -1306,6 +1540,11 @@ func (m *Model) trimMessageStore() {
 		drop++
 	}
 	if drop > 0 {
+		for k := 0; k < drop; k++ {
+			if s := m.messages[k].Seq; s != 0 {
+				delete(m.renderCache, s)
+			}
+		}
 		m.messages = m.messages[drop:]
 	}
 }
@@ -1370,18 +1609,18 @@ func (m *Model) sendPrompt(text string) {
 	// the event loop, so it must not read fields the loop can mutate. The
 	// session handle is set once at connect; ctx lives for the program's life.
 	sess, ctx, program := m.acpSession, m.ctx, m.program
-	if sess == nil || ctx == nil {
+	if sess == nil || ctx == nil || program == nil {
 		return
 	}
 	go func() {
-		_, err := sess.Prompt(ctx, openacp.PromptRequest{
+		resp, err := sess.Prompt(ctx, openacp.PromptRequest{
 			Prompt: []openacp.ContentBlock{{Type: "text", Text: text}},
 		})
 		if err != nil {
 			program.Send(acpErrorMsg{err: err})
 			return
 		}
-		program.Send(promptDoneMsg{})
+		program.Send(promptDoneMsg{steps: acpMetaInt(resp.Meta, "turn_count")})
 	}()
 }
 
@@ -1457,7 +1696,14 @@ func (m *Model) executeCommand(pc panelCommand) (tea.Model, tea.Cmd) {
 			m.cancelPrompt()
 		}
 		m.activeSessionID = ""
+		m.sessionTitle = ""
 		m.messages = nil
+		m.renderCache = nil
+		m.renderSeq = 0
+		m.retry = nil
+		m.lastTurnRetries = 0
+		m.lastTurnSteps = 0
+		m.sessionSteps = 0
 		m.inputQueue = nil
 		m.pendingConfigSet = nil
 		m.usedTokens, m.contextSize, m.promptCount = 0, 0, 0
@@ -1532,6 +1778,33 @@ func (m *Model) executeCommand(pc panelCommand) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusText = "Split view: off"
 		}
+		return m, nil
+	case actionCompact:
+		// Server-side control command: the agent's slash registry intercepts
+		// "/compact" at the top of OnPrompt and compacts the session history
+		// through the runtime's Compressor (kernel CompressAll). The
+		// round-trip never enters the conversation store nor reaches the
+		// LLM, so the result is surfaced as a toast, not a transcript
+		// message.
+		if m.acpSession == nil {
+			m.statusText = "Backend not connected"
+			return m, nil
+		}
+		if m.activeSessionID == "" {
+			m.statusText = "No active session to compact"
+			return m, nil
+		}
+		if m.loading {
+			m.statusText = "Wait for the current turn to finish"
+			return m, nil
+		}
+		if m.compacting {
+			return m, nil
+		}
+		m.compacting = true
+		m.loading = true
+		m.statusText = "Compacting context..."
+		m.sendPrompt("/compact")
 		return m, nil
 	default:
 		// actionSessions/actionModels/actionUpdateSkills land here until the
@@ -1790,15 +2063,16 @@ func (m *Model) execSelectedSession() (tea.Model, tea.Cmd) {
 	// The target session's own replay re-counts turns; usage waits for its
 	// first usage_update.
 	m.usedTokens, m.contextSize, m.promptCount = 0, 0, 0
+	m.lastTurnSteps, m.sessionSteps = 0, 0
 	m.loading = true
 	m.replaying = true
 	m.statusText = "Loading session..."
-	return m, m.loadSessionCmd(item.id)
+	return m, m.loadSessionCmd(item.id, item.title)
 }
 
 // loadSessionCmd closes the current session (if different) and loads the
 // target, replaying its history into the event stream.
-func (m *Model) loadSessionCmd(id string) tea.Cmd {
+func (m *Model) loadSessionCmd(id, title string) tea.Cmd {
 	// Snapshot backend state: the closure runs on a bubbletea command
 	// goroutine, off the event loop (activeSessionID can change mid-flight).
 	sess, ctx, workDir, activeID := m.acpSession, m.ctx, m.workDir, m.activeSessionID
@@ -1816,7 +2090,7 @@ func (m *Model) loadSessionCmd(id string) tea.Cmd {
 		if err != nil {
 			return sessionLoadedMsg{err: err}
 		}
-		msg := sessionLoadedMsg{sessionID: id, configOptions: resp.ConfigOptions}
+		msg := sessionLoadedMsg{sessionID: id, title: title, configOptions: resp.ConfigOptions}
 		if resp.Modes != nil {
 			msg.mode = string(resp.Modes.CurrentModeID)
 		}
@@ -1950,8 +2224,15 @@ func (m *Model) execSelectedConfig() (tea.Model, tea.Cmd) {
 			m.statusText = "Backend not connected"
 			return m, nil
 		}
+		// No session yet: hold the pick — the badges already reflect it —
+		// and apply it when the first session materializes (lazy creation
+		// on the first prompt, or a /sessions load). Creating a session
+		// here left a zero-message row in /sessions whenever the user never
+		// chatted in it.
+		m.setLocalConfigValue(m.configPickerID, value)
 		m.pendingConfigSet = &configPick{id: m.configPickerID, value: value}
-		return m, m.newSessionCmd()
+		m.pendingModelsPanel = false
+		return m, nil
 	}
 	return m, m.setConfigOptionCmd(m.configPickerID, value)
 }
@@ -1976,8 +2257,14 @@ func (m *Model) execSelectedModel() (tea.Model, tea.Cmd) {
 			m.statusText = "Backend not connected"
 			return m, nil
 		}
+		// No session yet: hold the pick (badge feedback included) and apply
+		// it when the first session materializes (see execSelectedConfig —
+		// creating here left an empty row in /sessions whenever the user
+		// never chatted).
+		m.setLocalConfigValue("model", modelID)
 		m.pendingConfigSet = &configPick{id: "model", value: modelID}
-		return m, m.newSessionCmd()
+		m.pendingModelsPanel = false
+		return m, nil
 	}
 	if m.acpSession == nil {
 		m.statusText = "Backend not connected"
@@ -1994,6 +2281,19 @@ func (m *Model) modelOptions() []string {
 // currentModel returns the active model id, or "" when unknown.
 func (m *Model) currentModel() string {
 	return sessionConfigValue(m.configOptions, "model")
+}
+
+// setLocalConfigValue rewrites one option's CurrentValue in the cached
+// config options — optimistic badge/picker feedback for picks held pending
+// sessionlessly (the server copy lands via configSetMsg once a session
+// exists to apply to).
+func (m *Model) setLocalConfigValue(id, value string) {
+	for i := range m.configOptions {
+		if string(m.configOptions[i].ID) == id {
+			m.configOptions[i].CurrentValue = value
+			return
+		}
+	}
 }
 
 // currentThoughtLevel returns the active thought-strength setting from the
@@ -2087,7 +2387,7 @@ func (m *Model) historyDown() {
 func (m *Model) updateWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.width = msg.Width
 	m.height = msg.Height
-	m.chatViewport.SetWidth(layout.GetViewWidth(m.width))
+	m.chatViewport.SetWidth(layout.GetTranscriptWidth(m.width))
 	m.chatViewport.SetHeight(layout.GetViewHeight(m.height))
 	m.updateInputWidth()
 	m.viewportDirty = true
@@ -2131,9 +2431,12 @@ func (m *Model) renderMessages() string {
 // fingerprint it was styled under, so unchanged messages skip re-styling.
 type renderCacheEntry struct {
 	vpW                                                  int
-	loading                                              bool
+	loading, replaying, turnEnd, permOpen                bool
 	expandThink, showSkill, showShell, showDetail        bool
-	thoughtStart, thoughtEnd                             time.Time
+	thoughtStart, thoughtEnd, createdAt                  time.Time
+	compactStart, compactEnd                             time.Time
+	compactedMsgs, freedTokens                           int
+	compactError                                         string
 	role, content, toolName, toolStatus, toolIn, toolOut string
 	block                                                string
 	skip                                                 bool
@@ -2142,16 +2445,29 @@ type renderCacheEntry struct {
 // renderCacheHits reports whether a cached entry was styled under exactly
 // the current message and viewport settings. The thought timestamps are part
 // of the fingerprint: closing a trailing thought (end stamp) must restyle
-// its collapsed summary even though the content is unchanged.
-func renderCacheHits(e renderCacheEntry, msg ChatMessage, vpW int, loading bool, vc components.VisibleConfig) bool {
+// its collapsed summary even though the content is unchanged. turnEnd and
+// replaying are in it too: a block gains (or loses) its turn-end marker row
+// when the next message arrives, the turn completes, or a replay finishes.
+// permOpen gates unapproved tool rows: opening or closing the permission
+// dialog flips whether pending tool calls are hidden.
+func renderCacheHits(e renderCacheEntry, msg ChatMessage, vpW int, loading, replaying, turnEnd, permOpen bool, vc components.VisibleConfig) bool {
 	return e.vpW == vpW &&
 		e.loading == loading &&
+		e.replaying == replaying &&
+		e.turnEnd == turnEnd &&
+		e.permOpen == permOpen &&
 		e.expandThink == vc.ExpandThinking &&
 		e.showSkill == vc.ShowToolSkill &&
 		e.showShell == vc.ShowToolShell &&
 		e.showDetail == vc.ShowToolDetail &&
 		e.thoughtStart.Equal(msg.ThoughtStart) &&
 		e.thoughtEnd.Equal(msg.ThoughtEnd) &&
+		e.createdAt.Equal(msg.CreatedAt) &&
+		e.compactStart.Equal(msg.CompactStart) &&
+		e.compactEnd.Equal(msg.CompactEnd) &&
+		e.compactedMsgs == msg.CompactedMsgs &&
+		e.freedTokens == msg.FreedTokens &&
+		e.compactError == msg.CompactError &&
 		e.role == msg.Role &&
 		e.content == msg.Content &&
 		e.toolName == msg.ToolName &&
@@ -2162,30 +2478,167 @@ func renderCacheHits(e renderCacheEntry, msg ChatMessage, vpW int, loading bool,
 
 // renderMessageBlock returns the styled block for message i (skip=true when
 // the message is gated out by visibility toggles). Untouched messages reuse
-// their cached block instead of re-running glamour/lipgloss styling.
+// their cached block instead of re-running glamour/lipgloss styling. A
+// message that ends its turn carries the opencode-style info row (model ·
+// duration) under the block, separated by a blank row on each side.
 func (m *Model) renderMessageBlock(i int, msg ChatMessage, vpW int) (block string, skip bool) {
 	if m.renderCache == nil {
-		m.renderCache = make(map[int]renderCacheEntry)
+		m.renderCache = make(map[int64]renderCacheEntry)
 	}
-	if e, ok := m.renderCache[i]; ok &&
-		renderCacheHits(e, msg, vpW, m.loading, m.visibleConfig) {
+	if msg.Seq == 0 {
+		m.renderSeq++
+		msg.Seq = m.renderSeq
+		if i >= 0 && i < len(m.messages) {
+			m.messages[i].Seq = msg.Seq
+		}
+	}
+	turnEnd := m.isTurnEndAt(i, msg)
+	permOpen := m.permissionReq != nil
+	if e, ok := m.renderCache[msg.Seq]; ok &&
+		renderCacheHits(e, msg, vpW, m.loading, m.replaying, turnEnd, permOpen, m.visibleConfig) {
 		return e.block, e.skip
 	}
 	e := renderCacheEntry{
-		vpW: vpW, loading: m.loading,
-		expandThink:  m.visibleConfig.ExpandThinking,
-		showSkill:    m.visibleConfig.ShowToolSkill,
-		showShell:    m.visibleConfig.ShowToolShell,
-		showDetail:   m.visibleConfig.ShowToolDetail,
-		thoughtStart: msg.ThoughtStart,
-		thoughtEnd:   msg.ThoughtEnd,
-		role:         msg.Role, content: msg.Content,
+		vpW: vpW, loading: m.loading, replaying: m.replaying, turnEnd: turnEnd,
+		permOpen:      permOpen,
+		expandThink:   m.visibleConfig.ExpandThinking,
+		showSkill:     m.visibleConfig.ShowToolSkill,
+		showShell:     m.visibleConfig.ShowToolShell,
+		showDetail:    m.visibleConfig.ShowToolDetail,
+		thoughtStart:  msg.ThoughtStart,
+		thoughtEnd:    msg.ThoughtEnd,
+		createdAt:     msg.CreatedAt,
+		compactStart:  msg.CompactStart,
+		compactEnd:    msg.CompactEnd,
+		compactedMsgs: msg.CompactedMsgs,
+		freedTokens:   msg.FreedTokens,
+		compactError:  msg.CompactError,
+		role:          msg.Role, content: msg.Content,
 		toolName: msg.ToolName, toolStatus: msg.ToolStatus,
 		toolIn: msg.ToolInput, toolOut: msg.ToolOutput,
 	}
 	e.block, e.skip = m.styleMessageBlock(msg, vpW)
-	m.renderCache[i] = e
+	if turnEnd && !e.skip && e.block != "" {
+		// Turn-end marker: the opencode-style info row (model · duration),
+		// kept one blank row away from the block above and the next block
+		// below. The trailing newline adds the closing blank row (the join
+		// between blocks contributes the boundary).
+		e.block = e.block + "\n" + m.turnEndMarkerRow(i, msg, vpW) + "\n"
+	}
+	m.renderCache[msg.Seq] = e
 	return e.block, e.skip
+}
+
+// isTurnEndAt reports whether message i closes its turn and should carry
+// the timestamp row: either the next message is the following turn's user
+// prompt, or it is the transcript's last message once the turn has settled
+// (not mid-prompt, not mid-replay — those get their marker when the
+// boundary message arrives). Legacy replayed rows without a wall-clock
+// never show one.
+func (m *Model) isTurnEndAt(i int, msg ChatMessage) bool {
+	if msg.CreatedAt.IsZero() {
+		return false
+	}
+	if i+1 < len(m.messages) {
+		return m.messages[i+1].Role == "user"
+	}
+	return !m.loading && !m.replaying
+}
+
+// turnEndMarkerRow renders the end-of-turn line: the active model and the
+// turn duration, muted, left-aligned at the transcript indent. Empty
+// segments are skipped along with their separator.
+func (m *Model) turnEndMarkerRow(i int, msg ChatMessage, vpW int) string {
+	muted := theme.BaseStyle().Foreground(theme.TextMute)
+	sep := muted.Render(" · ")
+	parts := ""
+	first := true
+	if model := utils.TruncateByWidth(m.currentModel(), 32); model != "" {
+		if !first {
+			parts += sep
+		}
+		parts += muted.Render(model)
+		first = false
+	}
+	if d := m.turnDuration(i, msg); d > 0 {
+		if !first {
+			parts += sep
+		}
+		parts += muted.Render(formatThoughtDuration(d))
+		first = false
+	}
+	// Kernel steps for the finished turn (model↔tool round trips).
+	// Live-only like the retry count — replayed turns carry no per-turn
+	// step counts, so older markers simply omit the segment.
+	if m.lastTurnSteps > 0 {
+		if !first {
+			parts += sep
+		}
+		parts += muted.Render(fmt.Sprintf("%d steps", m.lastTurnSteps))
+	}
+	if m.lastTurnRetries > 0 {
+		if !first {
+			parts += sep
+		}
+		parts += muted.Render(fmt.Sprintf("%d retries", m.lastTurnRetries))
+	}
+	return theme.BaseStyle().Render(strings.Repeat(" ", transcriptIndent)) +
+		utils.TruncateStyled(parts, max(1, vpW-transcriptIndent))
+}
+
+// maxTurnRowGap bounds turnDuration's backward walk. Rows inside one turn
+// stream within minutes of each other; a wider row-to-row jump means the
+// transcript cannot see the turn boundary — injected <system-reminder>
+// prompts (settings reload, sub-agent results) run real turns with no
+// visible user row, and an unbounded walk then lands on the previous
+// visible turn's user row days earlier (the 4043m16s marker regression).
+const maxTurnRowGap = time.Hour
+
+// turnDuration returns the wall-clock span of the turn that message i
+// closes: from the turn's opening user prompt to this message. 0 when the
+// closing message has no timestamp. The walk-back stops at the user row
+// (the natural opener), at a row without a timestamp (legacy replay — no
+// fabricated spans), and at any gap wider than maxTurnRowGap. Past one of
+// those, the duration covers just the visible burst rather than a
+// cross-turn nonsense value.
+func (m *Model) turnDuration(i int, msg ChatMessage) time.Duration {
+	if msg.CreatedAt.IsZero() {
+		return 0
+	}
+	start, cur := msg.CreatedAt, msg.CreatedAt
+	for j := i - 1; j >= 0; j-- {
+		prev := m.messages[j]
+		if prev.CreatedAt.IsZero() || cur.Sub(prev.CreatedAt) > maxTurnRowGap {
+			break
+		}
+		start, cur = prev.CreatedAt, prev.CreatedAt
+		if prev.Role == "user" {
+			break
+		}
+	}
+	if d := msg.CreatedAt.Sub(start); d > 0 {
+		return d
+	}
+	return 0
+}
+
+// modeBadge returns the session mode label and its badge color (Auto
+// primary, Manual green, Plan notify). An unknown non-empty mode falls back
+// to the raw value in normal text, an empty mode to "" (no badge).
+func (m *Model) modeBadge() (string, color.Color) {
+	switch m.mode {
+	case "auto":
+		return "Auto", theme.Primary
+	case "manual":
+		return "Manual", theme.Success
+	case "plan":
+		return "Plan", theme.Notify
+	default:
+		if m.mode == "" {
+			return "", nil
+		}
+		return m.mode, theme.TextNormal
+	}
 }
 
 // messageRoleBorder returns the transcript rail color for a role. The rail
@@ -2253,6 +2706,20 @@ func formatThoughtDuration(d time.Duration) string {
 	}
 }
 
+// stampACPMeta resolves a streaming ACP message's wall-clock: replay events
+// carry the stored row's created_at; legacy replayed rows carry none and
+// stay zero (no fabricated times); live events are stamped on arrival (a
+// streaming message's last chunk wins, the closest thing to its end time).
+func (m *Model) stampACPMeta(from time.Time) time.Time {
+	if !from.IsZero() {
+		return from
+	}
+	if m.replaying {
+		return time.Time{}
+	}
+	return time.Now()
+}
+
 // closeTrailingThought stamps the end time on a still-open trailing thought
 // message: thinking is over once any other message follows or the turn
 // finishes. Replayed thoughts (zero start) stay untouched — their duration
@@ -2281,7 +2748,9 @@ func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
 		body := renderMarkdownText(content, vpW-transcriptIndent)
 		return indentedBlock(body), false
 	case "thought":
-		return m.thoughtBlock(msg, content)
+		return m.thoughtBlock(msg, content, vpW)
+	case "compact":
+		return m.compactBlock(msg, vpW), false
 	case "tool":
 		// Skill/shell rows are gated by their toggles; the detail toggle
 		// hides input/output (the status line stays).
@@ -2291,7 +2760,15 @@ func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
 		if isShellTool(msg.ToolName) && !m.visibleConfig.ShowToolShell {
 			return "", true
 		}
-		return indentedBlock(m.toolBody(msg)), false
+		// A tool still awaiting approval stays out of the transcript while
+		// the permission dialog is open: the panel itself shows what is
+		// pending, and queued siblings (announced pending ahead of their
+		// turn) hide with it. After the dialog resolves the row appears in
+		// its running/done/failed state.
+		if msg.ToolStatus == toolPending && m.permissionReq != nil {
+			return "", true
+		}
+		return indentedBlock(m.toolBody(msg, vpW)), false
 	case "error":
 		return indentedBlock(theme.BaseStyle().Foreground(theme.Danger).Render(content)), false
 	default:
@@ -2299,51 +2776,203 @@ func (m *Model) styleMessageBlock(msg ChatMessage, vpW int) (string, bool) {
 	}
 }
 
-// thoughtBlock renders the thought as opencode does — a warning-colored
-// one-liner, cardless: "Thinking..." while the round-trip streams,
-// "Thought: <duration>" once done, a bare "Thought" when the span is
-// unknown (replayed history). /toggle_thinking expands it to the full
-// content in muted text under the same header.
-func (m *Model) thoughtBlock(msg ChatMessage, content string) (string, bool) {
+// thoughtBlock renders the thought as opencode does — a cardless,
+// warning-colored line with an opencode-style toggle marker: "+" marks a
+// collapsed block (the body is folded into the one-line preview), "-" an
+// expanded one. The open thought auto-expands to the full muted content
+// under the "Thinking..." header while the round-trip streams and collapses
+// again once the turn closes; /toggle_thinking expands every thought.
+func (m *Model) thoughtBlock(msg ChatMessage, content string, vpW int) (string, bool) {
+	streaming := msg.ThoughtEnd.IsZero() && m.loading
+	expanded := m.visibleConfig.ExpandThinking || streaming
+	mark := "+"
+	if expanded {
+		mark = "-"
+	}
 	var header string
 	switch {
-	case msg.ThoughtEnd.IsZero() && m.loading:
-		header = theme.BaseStyle().Foreground(theme.Warning).Render("Thinking...")
+	case streaming:
+		header = theme.BaseStyle().Foreground(theme.Warning).Render(mark + " Thinking...")
 	case !msg.ThoughtStart.IsZero() && !msg.ThoughtEnd.IsZero():
 		header = theme.BaseStyle().Foreground(theme.Warning).
-			Render("Thought: " + formatThoughtDuration(msg.ThoughtEnd.Sub(msg.ThoughtStart)))
+			Render(mark + " Thought: " + formatThoughtDuration(msg.ThoughtEnd.Sub(msg.ThoughtStart)))
 	case content != "":
-		header = theme.BaseStyle().Foreground(theme.Warning).Render("Thought")
+		header = theme.BaseStyle().Foreground(theme.Warning).Render(mark + " Thought")
 	default:
 		return "", true
 	}
-	if m.visibleConfig.ExpandThinking && content != "" {
-		body := theme.BaseStyle().Foreground(theme.TextMute).Render(content)
+	if content == "" {
+		return indentedBlock(header), false
+	}
+	if expanded {
+		// Collapse the model's blank lines (reasoning streams in \n\n
+		// paragraphs — rendered verbatim it reads as double spacing) and
+		// hard-wrap to the viewport so long lines never truncate at the
+		// right edge (rows are width-normalized downstream and cut, not
+		// wrapped).
+		body := theme.BaseStyle().Foreground(theme.TextMute).
+			Render(wrapPlain(collapseBlankLines(content), vpW-transcriptIndent))
 		return indentedBlock(header + "\n" + body), false
 	}
+	// Collapsed: the header row only — the duration is the information (the
+	// body stays behind the "+" until /toggle_thinking expands it).
 	return indentedBlock(header), false
 }
 
-// toolBody renders the tool row(s): a status icon + tool name (with the
-// folded input when details are on). Colors track status like opencode —
-// running bright, completed muted, failed red — and the output renders
-// muted below the status line.
-func (m *Model) toolBody(msg ChatMessage) string {
-	icon, fg := "⏳", theme.TextNormal
+// compactBlock renders the two-state compaction marker as a full-width
+// divider in the opencode style: a centered label riding a rule across the
+// transcript. The running pass labels in warning, the settled outcome is
+// muted with the counts/tokens/duration stats, and a failure keeps the rule
+// but renders the error in red. The label stays glyph-free: decorative
+// symbols are East-Asian-ambiguous width and overstrike the label in CJK
+// terminals.
+func (m *Model) compactBlock(msg ChatMessage, vpW int) string {
+	label, fg := "Context compacted", theme.TextMute
+	switch {
+	case msg.CompactEnd.IsZero():
+		label, fg = "Compacting context...", theme.Warning
+	case msg.CompactError != "":
+		label, fg = "✗ Compaction failed: "+msg.CompactError, theme.Danger
+	default:
+		label = fmt.Sprintf("Context compacted · %d messages · freed ~%d tokens · %s",
+			msg.CompactedMsgs, msg.FreedTokens,
+			formatThoughtDuration(msg.CompactEnd.Sub(msg.CompactStart)))
+	}
+	return centerRule(label, vpW, fg)
+}
+
+// centerRule renders label centered on a horizontal rule spanning w: "─"
+// fills both sides with a one-space pad around the label, everything in fg.
+// The label is truncated first so at least a dash fits on each side.
+func centerRule(label string, w int, fg color.Color) string {
+	label = utils.TruncateByWidth(label, max(1, w-4))
+	style := theme.BaseStyle().Foreground(fg)
+	rest := w - utils.DisplayWidth(label) - 2
+	if rest < 2 {
+		return style.Render(label)
+	}
+	left := rest / 2
+	return style.Render(strings.Repeat("─", left) + " " + label + " " + strings.Repeat("─", rest-left))
+}
+
+// collapseBlankLines drops blank lines from a streamed reasoning body:
+// models emit \n\n-style paragraph breaks, which rendered verbatim read as
+// double spacing.
+func collapseBlankLines(s string) string {
+	var out []string
+	for _, ln := range strings.Split(s, "\n") {
+		if strings.TrimSpace(ln) != "" {
+			out = append(out, ln)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// wrapPlain hard-wraps plain text to maxW display columns (CJK aware),
+// preferring space break points; a run longer than maxW is cut at the
+// column. Used for the streamed thought body, which renders as raw text
+// without markdown wrapping.
+func wrapPlain(s string, maxW int) string {
+	if maxW <= 0 {
+		return s
+	}
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		for utils.DisplayWidth(line) > maxW {
+			w, cut, lastSpace := 0, len(line), -1
+			for i, r := range line {
+				if w+utils.DisplayWidth(string(r)) > maxW {
+					cut = i
+					break
+				}
+				w += utils.DisplayWidth(string(r))
+				if r == ' ' {
+					lastSpace = i
+				}
+			}
+			seg, next := line[:cut], line[cut:]
+			if lastSpace > 0 {
+				seg, next = line[:lastSpace], line[lastSpace+1:]
+			}
+			out = append(out, strings.TrimRight(seg, " "))
+			line = next
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
+// toolBody renders a tool call in the opencode style: a status glyph glued
+// to the title, then — only when the title carries no argument info — one
+// compact [k=v …] bracket folded from the raw input. The server's
+// ToolTitle already summarizes the useful argument ("read README.md",
+// "settings list"), so repeating it as key=value pairs just duplicates the
+// line; a bare-name title ("settings") keeps the bracket for context.
+// ShowToolDetail unfolds a muted, wrapped output preview under the call
+// line. The glyph is ASCII: East-Asian-ambiguous glyphs (→) render
+// double-width in CJK terminals and overstrike the name.
+func (m *Model) toolBody(msg ChatMessage, vpW int) string {
+	icon, fg := ">", theme.TextNormal
 	switch msg.ToolStatus {
 	case toolDone:
-		icon, fg = "✓", theme.TextMute
+		icon, fg = ">", theme.TextMute
 	case toolFailed:
 		icon, fg = "✗", theme.Danger
 	}
-	line := theme.BaseStyle().Foreground(fg).Render(icon + " " + msg.ToolName)
-	if m.visibleConfig.ShowToolDetail && msg.ToolInput != "" {
-		line += theme.BaseStyle().Foreground(fg).Render(" (" + foldOutput(msg.ToolInput, 1) + ")")
+	style := theme.BaseStyle().Foreground(fg)
+	line := style.Render(icon + " " + msg.ToolName)
+	// ToolTitle always answers "name …" when it extracted a field, so a
+	// single-word title means the raw args are the only description left.
+	if len(strings.Fields(msg.ToolName)) <= 1 {
+		budget := vpW - transcriptIndent - utils.DisplayWidth(icon+" "+msg.ToolName) - 1
+		if args := compactToolArgs(msg.ToolInput, budget); args != "" {
+			line += style.Render(" " + args)
+		}
 	}
 	if m.visibleConfig.ShowToolDetail && msg.ToolOutput != "" {
-		line += "\n" + theme.BaseStyle().Foreground(theme.TextMute).Render(foldOutput(msg.ToolOutput, defaultToolOutputLines))
+		lines := strings.Split(foldOutput(msg.ToolOutput, defaultToolOutputLines), "\n")
+		for i, l := range lines {
+			lines[i] = wrapPlain(l, vpW-transcriptIndent)
+		}
+		line += "\n" + theme.BaseStyle().Foreground(theme.TextMute).Render(strings.Join(lines, "\n"))
 	}
 	return line
+}
+
+// compactToolArgs folds a tool call's JSON input into one "[k=v …]" bracket
+// (opencode's "[limit=80]" look). Values are flattened to one line and
+// individually truncated; the whole bracket is clamped to maxW. Non-JSON
+// input renders as a single truncated token; empty input renders "".
+func compactToolArgs(input string, maxW int) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ""
+	}
+	var pairs []string
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(input), &obj); err == nil && obj != nil {
+		for k, v := range obj {
+			val := strings.TrimSpace(strings.ReplaceAll(fmt.Sprintf("%v", v), "\n", " "))
+			if val == "" {
+				continue
+			}
+			if utils.DisplayWidth(val) > 24 {
+				val = utils.TruncateByWidth(val, 24)
+			}
+			pairs = append(pairs, k+"="+val)
+		}
+		sort.Strings(pairs)
+	} else {
+		pairs = append(pairs, strings.ReplaceAll(input, "\n", " "))
+	}
+	s := strings.Join(pairs, " ")
+	if s == "" || maxW <= 4 {
+		return ""
+	}
+	if utils.DisplayWidth(s) > maxW-2 {
+		s = utils.TruncateByWidth(s, maxW-2)
+	}
+	return "[" + s + "]"
 }
 
 // renderMessagesRange renders messages[start:end) with the standard block
@@ -2368,7 +2997,7 @@ func (m *Model) renderMessagesRange(start, end int) string {
 	if end < start {
 		end = start
 	}
-	vpW := layout.GetViewWidth(m.width)
+	vpW := layout.GetTranscriptWidth(m.width)
 	var doc strings.Builder
 	// The style cache can never legitimately hold more entries than there
 	// are messages (indices), so capping it against the message count bounds

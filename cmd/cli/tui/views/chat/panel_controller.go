@@ -122,10 +122,18 @@ func (m *Model) handlePanelKey(k tea.KeyPressMsg) (cmd tea.Cmd, handled bool) {
 				m.panelIdx++
 			}
 		case "enter":
-			// Nothing selected (no matches): keep the sheet open so the
-			// draft stays editable instead of bouncing the user.
 			if len(m.buildPanelCommands()) > 0 {
 				_, cmd = m.panelExecute()
+				return cmd, true
+			}
+			// No panel matches: a command kept out of the panel (the
+			// /toggle_* family) still runs when typed in full; anything else
+			// keeps the sheet open so the draft stays editable.
+			if slash := strings.TrimSpace(m.chatTextarea.Value()); registeredSlash(slash) {
+				m.panelOpen = false
+				m.panelMode = panelModeCommand
+				m.panelFilter = ""
+				m.runSlashCommand(slash)
 			}
 		default:
 			var tcmd tea.Cmd

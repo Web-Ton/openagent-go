@@ -4,11 +4,16 @@ const (
 	MinWidth     = 60
 	MinHeight    = 18
 	BarWidth     = 1
-	InputHeight  = 2
-	Footerheight = 1
-	Padding      = 1
-	StatusHeight = 1
-	SpaceHeight  = 1
+	ScrollbarGap = 1
+	// TranscriptTopPad is the blank page row above the first message block
+	// in the transcript document, so the list never touches the viewport's
+	// top edge.
+	TranscriptTopPad = 1
+	InputHeight      = 2
+	Footerheight     = 1
+	Padding          = 1
+	StatusHeight     = 1
+	SpaceHeight      = 1
 )
 
 // Chat
@@ -33,6 +38,13 @@ func GetPropmptWidth(width int) int {
 
 func GetViewWidth(width int) int {
 	return max(1, GetContentWidth(width)-BarWidth)
+}
+
+// GetTranscriptWidth returns the message-list viewport width: the view width
+// minus the one-column gap kept between the transcript and the scrollbar, so
+// message blocks never touch the bar.
+func GetTranscriptWidth(width int) int {
+	return max(1, GetViewWidth(width)-ScrollbarGap)
 }
 
 func GetInputAreaHeight() int {

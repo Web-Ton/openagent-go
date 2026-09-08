@@ -2,9 +2,13 @@ package acp
 
 import (
 	"context"
+	"slices"
+	"sort"
+	"strings"
 	"testing"
 
 	openacp "github.com/yusheng-g/openagent-go/acp/sdk"
+	"github.com/yusheng-g/openagent-go/kernel"
 )
 
 // TestOnListConfigOptionsDefaults guards the session-less shape of the
@@ -27,8 +31,11 @@ func TestOnListConfigOptionsDefaults(t *testing.T) {
 	if !ok {
 		t.Fatal("config options must include the mode select")
 	}
-	if mode.CurrentValue != "auto" {
-		t.Errorf("mode currentValue = %v, want auto (default)", mode.CurrentValue)
+	// Must advertise the server's REAL default (manual), not a hardcoded
+	// value: the cold-start picker preselects on this, and a phantom "auto"
+	// made the first switch to auto a no-op (value == current early return).
+	if want := srv.defaultMode(); mode.CurrentValue != want {
+		t.Errorf("mode currentValue = %v, want %q (server default)", mode.CurrentValue, want)
 	}
 	tl, ok := byID["thought_level"]
 	if !ok {
@@ -54,5 +61,35 @@ func TestOnListConfigOptionsDefaults(t *testing.T) {
 	if len(resp2.ConfigOptions) != len(resp.ConfigOptions) {
 		t.Errorf("repeated calls diverge: %d vs %d options",
 			len(resp.ConfigOptions), len(resp2.ConfigOptions))
+	}
+}
+
+// TestModelIDsSorted pins the /models ordering: the registry is a map and
+// Go map iteration is randomized per call, which shuffled the panel between
+// opens. ModelIDs must return keys in sorted order every time.
+func TestModelIDsSorted(t *testing.T) {
+	srv := NewAgentServer(nil, kernel.Deps{}, nil, nil)
+	keys := []string{
+		"openai/glm-5.3-flash",
+		"mock/apple-v1-pro",
+		"openai/deepseek-v4-flash-0731",
+		"mock/apple-v1-flash",
+		"mock/benchmark-v1-flash",
+	}
+	for _, k := range keys {
+		provider, model, _ := strings.Cut(k, "/")
+		srv.SetModel(provider, model, "sk-test", "", 0, 0)
+	}
+	got := srv.ModelIDs()
+	want := append([]string(nil), keys...)
+	sort.Strings(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("ModelIDs = %v, want sorted %v", got, want)
+	}
+	// Repeated calls stay stable (the shuffle regression).
+	for range 20 {
+		if g := srv.ModelIDs(); !slices.Equal(g, want) {
+			t.Fatalf("ModelIDs not stable: %v", g)
+		}
 	}
 }

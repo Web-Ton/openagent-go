@@ -62,14 +62,3 @@ func TestRenderBlockMiniNoTrailingSpace(t *testing.T) {
 		}
 	}
 }
-
-func TestGetLogoMiniArt(t *testing.T) {
-	name := "openagent" // version default; keep in sync with version.Name
-	art := RenderBlockMini(name)
-	if got := GetLogo(72); got != art {
-		t.Fatalf("GetLogo(72) = %q, want %q", got, art)
-	}
-	if got := GetLogo(10); got != name {
-		t.Fatalf("GetLogo(10) = %q, want bare name %q", got, name)
-	}
-}

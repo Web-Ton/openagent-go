@@ -457,11 +457,30 @@ func (s *Session) notify(ctx context.Context, method string, params any) error {
 //	https://agentclientprotocol.com/protocol/v1/schema#session%2Fupdate
 type EventHandler interface {
 	// OnAgentMessage — sessionUpdate "agent_message_chunk".
-	OnAgentMessage(text string)
+	// meta carries the update's _meta (nil when absent); loadSession replay
+	// uses it to pass the stored message CreatedAt as "created_at".
+	OnAgentMessage(text string, meta map[string]any)
 	// OnAgentThought — sessionUpdate "agent_thought_chunk".
-	OnAgentThought(text string)
+	// meta carries the update's _meta (see OnAgentMessage).
+	OnAgentThought(text string, meta map[string]any)
 	// OnUserMessage — sessionUpdate "user_message_chunk" (during session/load history replay).
-	OnUserMessage(text string)
+	// meta carries the update's _meta (see OnAgentMessage).
+	OnUserMessage(text string, meta map[string]any)
+	// OnContextCompacting — sessionUpdate "context_compacting": history
+	// compaction started (automatic, or manual via the server-side
+	// /compact command). meta carries "overflow_tokens" and
+	// "total_messages" when available.
+	OnContextCompacting(meta map[string]any)
+	// OnContextCompacted — sessionUpdate "context_compacted": compaction
+	// finished. meta carries "compressed_messages" and "freed_tokens" on
+	// success, "error" on failure.
+	OnContextCompacted(meta map[string]any)
+	// OnRetrying — sessionUpdate "model_retrying": the model call hit a
+	// transient error and the kernel backs off before the next attempt.
+	// meta carries "attempt" (1-based, the upcoming attempt), "max_retries",
+	// "backoff_seconds" and "error". Turn-scoped transient state: never
+	// stored, never replayed.
+	OnRetrying(meta map[string]any)
 	// OnToolCall — sessionUpdate "tool_call" / "tool_call_update".
 	OnToolCall(tc ToolCallUpdate)
 	// OnPlan — sessionUpdate "plan".
@@ -684,15 +703,15 @@ func (s *Session) dispatchSessionUpdate(params json.RawMessage) {
 	switch u.SessionUpdate {
 	case "agent_message_chunk":
 		if cb := u.ContentAsBlock(); cb != nil {
-			h.OnAgentMessage(cb.Text)
+			h.OnAgentMessage(cb.Text, u.Meta)
 		}
 	case "agent_thought_chunk":
 		if cb := u.ContentAsBlock(); cb != nil {
-			h.OnAgentThought(cb.Text)
+			h.OnAgentThought(cb.Text, u.Meta)
 		}
 	case "user_message_chunk":
 		if cb := u.ContentAsBlock(); cb != nil {
-			h.OnUserMessage(cb.Text)
+			h.OnUserMessage(cb.Text, u.Meta)
 		}
 	case "tool_call", "tool_call_update":
 		title := ""
@@ -700,6 +719,7 @@ func (s *Session) dispatchSessionUpdate(params json.RawMessage) {
 			title = *u.Title
 		}
 		h.OnToolCall(ToolCallUpdate{
+			Meta:       u.Meta,
 			ToolCallID: u.ToolCallID, Title: title,
 			Kind: u.Kind, Status: u.Status,
 			RawInput: u.RawInput, RawOutput: u.RawOutput,
@@ -711,6 +731,12 @@ func (s *Session) dispatchSessionUpdate(params json.RawMessage) {
 		h.OnAvailableCommandsUpdate(u.AvailableCommands)
 	case "current_mode_update":
 		h.OnModeUpdate(u.CurrentModeID)
+	case "context_compacting":
+		h.OnContextCompacting(u.Meta)
+	case "context_compacted":
+		h.OnContextCompacted(u.Meta)
+	case "model_retrying":
+		h.OnRetrying(u.Meta)
 	case "config_option_update":
 		h.OnConfigOptionUpdate(u.ConfigOptions)
 	case "usage_update":

@@ -45,6 +45,12 @@ func New(apiKey, modelID, baseURL string) *Model {
 		option.WithHTTPClient(&http.Client{
 			Timeout: 5 * time.Minute,
 		}),
+		// The SDK's built-in retries (default 2, silent exponential
+		// backoff) would swallow transient failures before the kernel's
+		// callModel loop ever sees them — hiding the backoff, the
+		// Retry-After handling and the StreamRetrying events. Retry
+		// policy lives in exactly one layer: the kernel.
+		option.WithMaxRetries(0),
 	}
 	if baseURL != "" {
 		opts = append(opts, option.WithBaseURL(baseURL))

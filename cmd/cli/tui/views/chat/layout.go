@@ -27,7 +27,9 @@ type viewGeom struct {
 func (m *Model) viewportHeight() int {
 	if m.permissionReq != nil {
 		// The permission panel replaces the input area; shrink the viewport
-		// so transcript + panel + status fit exactly in the terminal.
+		// so transcript + separator + panel + status fit exactly in the
+		// terminal — the 1 buys the blank row between transcript and panel
+		// (the render side must emit it, see renderLeft's permission path).
 		panel := m.renderPermissionPanel(m.getContentWidth()-1, 0)
 		ph := lipgloss.Height(panel)
 		return max(3, m.height-1-ph-layout.StatusHeight)

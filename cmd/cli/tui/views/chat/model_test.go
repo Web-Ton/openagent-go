@@ -82,9 +82,13 @@ func TestUsageUpdateSetsTokens(t *testing.T) {
 	if m2.usedTokens != 12300 || m2.contextSize != 1000000 {
 		t.Errorf("usage = %d/%d, want 12300/1000000", m2.usedTokens, m2.contextSize)
 	}
-	// Sidebar shows the consumed context against the window.
-	if got := m2.contextValue(); got != "12.3k / 1M tokens" {
-		t.Errorf("contextValue = %q, want %q", got, "12.3k / 1M tokens")
+	// Sidebar shows the used token count, then the window share on its own
+	// line ("16,110 tokens" / "2% used" style).
+	if got := m2.contextValue(); got != "12,300 tokens" {
+		t.Errorf("contextValue = %q, want %q", got, "12,300 tokens")
+	}
+	if got := m2.contextPercent(); got != "1% used" {
+		t.Errorf("contextPercent = %q, want %q", got, "1% used")
 	}
 	// A model that never learned the window shows the used count alone
 	// (total 0 falls through — fresh model so no window is remembered).
@@ -92,11 +96,15 @@ func TestUsageUpdateSetsTokens(t *testing.T) {
 	if got := upd.(*Model).contextValue(); got != "42 tokens" {
 		t.Errorf("contextValue = %q, want %q", got, "42 tokens")
 	}
+	if got := upd.(*Model).contextPercent(); got != "" {
+		t.Errorf("contextPercent = %q, want empty without a window", got)
+	}
 }
 
 func TestFormatTokens(t *testing.T) {
 	cases := map[int]string{
-		0: "0", 834: "834", 12300: "12.3k", 1000000: "1M", 2500000: "2.5M",
+		0: "0", 834: "834", 16110: "16,110", 12300: "12,300",
+		1000000: "1,000,000", 2500000: "2,500,000",
 	}
 	for n, want := range cases {
 		if got := formatTokens(n); got != want {
@@ -151,7 +159,7 @@ func TestSidebarShowsContextTurnsAndPlanProgress(t *testing.T) {
 		{Content: "step two", Status: "in_progress"},
 	}
 	right := utils.StripANSI(m.renderRight())
-	for _, want := range []string{"12.3k / 1M tokens", "Turns", "7", "Plans 1/2", "[▶] step two"} {
+	for _, want := range []string{"12,300 tokens", "1% used", "Turns", "7", "Plans 1/2", "[▶] step two"} {
 		if !strings.Contains(right, want) {
 			t.Errorf("sidebar missing %q:\n%s", want, right)
 		}
@@ -279,26 +287,69 @@ func TestPanelCtrlPOpenAndFilter(t *testing.T) {
 	if !m.panelOpen {
 		t.Fatal("ctrl+p should open the panel")
 	}
-	for _, r := range "thin" {
+	for _, r := range "search" {
 		m.Update(tea.KeyPressMsg{Code: r})
 	}
 	cmds := m.buildPanelCommands()
-	if len(cmds) != 1 || cmds[0].slash != "/toggle_thinking" {
-		t.Fatalf("filter 'thin' should leave one command, got %+v", cmds)
+	if len(cmds) != 1 || cmds[0].slash != "/search" {
+		t.Fatalf("filter 'search' should leave one command, got %+v", cmds)
 	}
 }
 
-func TestPanelExecuteTogglesAndCloses(t *testing.T) {
+// TestPanelHidesToggleFamily guards the /toggle_* commands staying out of
+// the command panel: neither the Ctrl+P palette nor the "/" sheet lists
+// them, but they stay registered so typed input still runs them.
+// TestPanelScopeBySource pins the two panels' scopes: the Ctrl+P palette
+// lists every registered command (including the visibility toggles), while
+// the "/"-docked sheet lists the curated subset — the toggles stay
+// typed-runnable only there, with /toggle_mode as the listed exception.
+func TestPanelScopeBySource(t *testing.T) {
+	m := newTestModel()
+
+	m.panelOpen = true
+	m.panelFromSlash = false // Ctrl+P palette
+	palette := map[string]bool{}
+	for _, pc := range m.buildPanelCommands() {
+		palette[pc.slash] = true
+	}
+	for _, want := range []string{"/toggle_thinking", "/toggle_skill", "/toggle_shell", "/toggle_toolcall", "/toggle_linenumbers", "/toggle_mode", "/sessions"} {
+		if !palette[want] {
+			t.Errorf("palette must list %s", want)
+		}
+	}
+
+	m.panelFromSlash = true // "/"-docked sheet
+	listedMode := false
+	for _, pc := range m.buildPanelCommands() {
+		if pc.slash == "/toggle_mode" {
+			listedMode = true
+			continue
+		}
+		if strings.HasPrefix(pc.slash, "/toggle_") {
+			t.Errorf("sheet must not list visibility toggle %s", pc.slash)
+		}
+	}
+	if !listedMode {
+		t.Error("/toggle_mode must stay listed in the slash sheet")
+	}
+	if !registeredSlash("/toggle_thinking") {
+		t.Error("/toggle_thinking must stay registered for typed input")
+	}
+}
+
+func TestPanelExecuteClosesAndRuns(t *testing.T) {
+	t.Cleanup(theme.Reset) // /theme applies a global palette
 	m := newTestModel()
 	m.panelOpen = true
-	m.panelFilter = "thin"
+	m.panelFilter = "theme"
 	m.panelIdx = 0
+	pre := m.themeIdx
 	m2, _ := enterKey(m)
 	if m2.panelOpen {
 		t.Error("panel should close after executing a command")
 	}
-	if !m2.visibleConfig.ExpandThinking {
-		t.Error("panel selection should expand thinking (default collapsed)")
+	if m2.themeIdx != (pre+1)%len(themePresets) {
+		t.Error("panel selection should run the selected command (/theme)")
 	}
 }
 
@@ -565,10 +616,12 @@ func TestConfigOptionsMsgErrClearsPendingModels(t *testing.T) {
 	}
 }
 
-// TestModelPickWithoutSessionCreatesThenSets guards the cold-start pick: a
-// model chosen from the session-less picker creates a session lazily and
-// applies the choice via set_config_option once the session lands.
-func TestModelPickWithoutSessionCreatesThenSets(t *testing.T) {
+// TestModelPickWithoutSessionHoldsPick guards the cold-start pick: a model
+// chosen from the session-less picker is held pending (badges reflect it)
+// and fires NO session creation — creating one there left zero-message rows
+// in /sessions. The pick applies via set_config_option once a session
+// materializes (lazy creation on the first prompt, or a /sessions load).
+func TestModelPickWithoutSessionHoldsPick(t *testing.T) {
 	m := newTestModel()
 	m.acpSession = testAcpSession(t)
 	m.configOptions = testModelOptions() // as cached by the list fetch
@@ -583,11 +636,18 @@ func TestModelPickWithoutSessionCreatesThenSets(t *testing.T) {
 	if m2.pendingConfigSet == nil || m2.pendingConfigSet.id != "model" || m2.pendingConfigSet.value != "m2" {
 		t.Errorf("pendingConfigSet = %+v, want model/m2", m2.pendingConfigSet)
 	}
-	if cmd == nil {
-		t.Fatal("picking without a session must fire the new-session command")
+	if cmd != nil {
+		t.Error("picking without a session must not create one")
 	}
-	// The session lands: the pending pick must turn into a set_config_option
-	// command (non-nil), and the transcript stays untouched.
+	if got := m2.currentModel(); got != "m2" {
+		t.Errorf("model badge = %q, want the held pick m2", got)
+	}
+	if m2.loading {
+		t.Error("a held pick must not enter the loading state")
+	}
+	// The session lands (first prompt or load): the pending pick must turn
+	// into a set_config_option command (non-nil), and the transcript stays
+	// untouched.
 	m3, setCmd := m2.Update(newSessionMsg{sessionID: "sess-boot", configOptions: testModelOptions()})
 	m4 := m3.(*Model)
 	if m4.pendingConfigSet != nil {
@@ -616,6 +676,44 @@ func TestNewSessionMsgErrClearsPendingModels(t *testing.T) {
 	}
 	if !strings.Contains(m2.statusText, "New session failed") {
 		t.Errorf("statusText = %q, want failure notice", m2.statusText)
+	}
+}
+
+// TestModePickHoldsUntilSessionLoad pins the config-pick side of the lazy
+// cold start: a session-less mode pick is held (no session created, badge
+// reflects it) and applies to the first session that appears — here via a
+// /sessions load, overriding the loaded session's own mode.
+func TestModePickHoldsUntilSessionLoad(t *testing.T) {
+	m := newTestModel()
+	m.acpSession = testAcpSession(t)
+	m.configOptions = sampleConfigOptions()
+	m.configPickerID = "mode"
+	m.panelOpen = true
+	m.panelMode = panelModeConfig
+	m.panelIdx = 0 // "auto" (current is manual)
+	upd, cmd := m.execSelectedConfig()
+	m2 := upd.(*Model)
+	if cmd != nil {
+		t.Error("a held mode pick must not create a session")
+	}
+	if m2.activeSessionID != "" || m2.pendingConfigSet == nil ||
+		m2.pendingConfigSet.id != "mode" || m2.pendingConfigSet.value != "auto" {
+		t.Fatalf("pick must be held pending: session=%q pick=%+v", m2.activeSessionID, m2.pendingConfigSet)
+	}
+	if m2.mode != "auto" {
+		t.Errorf("badge mode = %q, want the held pick auto", m2.mode)
+	}
+
+	m3, setCmd := m2.Update(sessionLoadedMsg{sessionID: "acp_loaded", mode: "manual"})
+	m4 := m3.(*Model)
+	if m4.pendingConfigSet != nil {
+		t.Error("pendingConfigSet must clear once applied to the loaded session")
+	}
+	if setCmd == nil {
+		t.Fatal("loading a session with a held pick must fire set_config_option")
+	}
+	if m4.mode != "auto" {
+		t.Errorf("mode = %q, want the pick to override the loaded session's manual", m4.mode)
 	}
 }
 
@@ -690,7 +788,7 @@ func TestPanelRenderRowsConsistent(t *testing.T) {
 
 	lines := strings.Split(utils.StripANSI(rendered), "\n")
 	// title + blank + rows + blank + footer; no top/bottom frame lines.
-	wantLines := len(allPanelCommands()) + 4
+	wantLines := len(m.buildPanelCommands()) + 4
 	if got := len(lines); got != wantLines {
 		t.Fatalf("panel has %d lines, want %d — row wrapping detected", got, wantLines)
 	}
@@ -1065,25 +1163,81 @@ func TestToolNameClassifiers(t *testing.T) {
 	}
 }
 
+func TestCompactToolArgs(t *testing.T) {
+	// JSON input folds into sorted [k=v] pairs; empty input renders "".
+	if got := compactToolArgs("", 40); got != "" {
+		t.Errorf("empty input should render no args, got %q", got)
+	}
+	if got := compactToolArgs("{}", 40); got != "" {
+		t.Errorf("empty object should render no args, got %q", got)
+	}
+	if got := compactToolArgs(`{"action":"list"}`, 40); got != "[action=list]" {
+		t.Errorf("single pair should render as [k=v], got %q", got)
+	}
+	if got := compactToolArgs(`{"limit":80,"path":"README.md"}`, 40); got != "[limit=80 path=README.md]" {
+		t.Errorf("pairs should sort by key and drop JSON quoting, got %q", got)
+	}
+	// Overlong values truncate to 24 cols; non-JSON input falls back to one token.
+	long := compactToolArgs(`{"path":"`+strings.Repeat("x", 40)+`"}`, 40)
+	if got := utils.DisplayWidth(long); got > len("path=")+24+len("[]") {
+		t.Errorf("long values should truncate, got width %d (%q)", got, long)
+	}
+	if got := compactToolArgs("ls -la", 40); got != "[ls -la]" {
+		t.Errorf("non-JSON input should fall back to a raw token, got %q", got)
+	}
+	// The bracket clamps to the width budget handed down from the viewport.
+	if got := compactToolArgs(`{"a":"1","b":"2","c":"3"}`, 10); utils.DisplayWidth(got) > 10 {
+		t.Errorf("bracket should clamp to maxW, got %q (width %d)", got, utils.DisplayWidth(got))
+	}
+	if got := compactToolArgs(`{"action":"list"}`, 3); got != "" {
+		t.Errorf("too-narrow budget should drop args entirely, got %q", got)
+	}
+}
+
+// TestToolRowTitleDeduplicatesArgs: the ACP title already summarizes the
+// useful argument ("settings list"), so the [k=v] bracket only renders when
+// the title is a bare tool name (or the detail toggle unfolds the raw args).
+func TestToolRowTitleDeduplicatesArgs(t *testing.T) {
+	m := newTestModel()
+	m.visibleConfig.ShowToolDetail = false
+	vpW := layout.GetTranscriptWidth(100)
+	titled, _ := m.renderMessageBlock(0, ChatMessage{Role: "tool", ToolName: "settings list", ToolStatus: toolDone, ToolInput: `{"action":"list"}`}, vpW)
+	if strings.Contains(utils.StripANSI(titled), "[action=list]") {
+		t.Errorf("titled row should not repeat the args:\n%s", utils.StripANSI(titled))
+	}
+	bare, _ := m.renderMessageBlock(1, ChatMessage{Role: "tool", ToolName: "settings", ToolStatus: toolDone, ToolInput: `{"action":"list"}`}, vpW)
+	if !strings.Contains(utils.StripANSI(bare), "[action=list]") {
+		t.Errorf("bare-title row should fold the raw args for context:\n%s", utils.StripANSI(bare))
+	}
+	m.visibleConfig.ShowToolDetail = true
+	detail, _ := m.renderMessageBlock(2, ChatMessage{Role: "tool", ToolName: "settings list", ToolStatus: toolDone, ToolInput: `{"action":"list"}`, ToolOutput: "ok"}, vpW)
+	plain := utils.StripANSI(detail)
+	if !strings.Contains(plain, "ok") || strings.Contains(plain, "[action=list]") {
+		t.Errorf("detail toggle should unfold output without repeating titled args:\n%s", plain)
+	}
+}
+
 func TestThoughtCollapsedByDefault(t *testing.T) {
 	m := newTestModel()
-	m.messages = append(m.messages, ChatMessage{Role: "thought", Content: "secret reasoning", TurnId: 0})
+	// Collapsed shows the header only — no content leaks until the thought
+	// is expanded (globally via /toggle_thinking).
+	m.messages = append(m.messages, ChatMessage{Role: "thought", Content: "secret reasoning\nmore hidden steps", TurnId: 0})
 	rendered := m.renderMessages()
-	if strings.Contains(rendered, "secret reasoning") {
-		t.Error("collapsed thought must not show its content by default")
+	if strings.Contains(rendered, "secret reasoning") || strings.Contains(rendered, "more hidden steps") {
+		t.Error("collapsed thought must not show any content by default")
 	}
 	if !strings.Contains(rendered, "Thought") {
 		t.Error("collapsed thought should show a summary line")
 	}
 	m.visibleConfig.ExpandThinking = true
-	if got := m.renderMessages(); !strings.Contains(got, "secret reasoning") {
-		t.Error("expanded thought should render its content")
+	if got := m.renderMessages(); !strings.Contains(got, "more hidden steps") {
+		t.Error("expanded thought should render its full content")
 	}
 	m.visibleConfig.ExpandThinking = false
 	m.visibleConfig.ShowToolDetail = false
 	m.messages = append(m.messages, ChatMessage{Role: "tool", TurnId: 0, ToolCallID: "a", ToolName: "read_file", ToolStatus: toolDone, ToolOutput: "data"})
 	rendered = m.renderMessages()
-	if !strings.Contains(rendered, "✓ read_file") {
+	if !strings.Contains(rendered, "> read_file") {
 		t.Errorf("tool row should render, got:\n%s", rendered)
 	}
 	if strings.Contains(rendered, "data") {
@@ -1091,28 +1245,260 @@ func TestThoughtCollapsedByDefault(t *testing.T) {
 	}
 }
 
-// TestThoughtSummaryStates covers the collapsed card's three one-liners:
-// streaming shows "Thinking...", a measured span shows the duration, and a
-// replayed span of unknown length shows a bare "Thought". None of them may
-// leak the thought text.
+// TestThoughtSummaryStates covers the three header states and the new
+// collapsed/expanded rhythm: the streaming thought auto-expands (full
+// content under "Thinking..."), a measured span collapses to the bare
+// duration header, and a replayed span of unknown length shows a bare
+// "Thought" header — no content in either collapsed state.
 func TestThoughtSummaryStates(t *testing.T) {
 	m := newTestModel()
 	streaming := ChatMessage{Role: "thought", Content: "mid-flight", TurnId: 0, ThoughtStart: time.Now()}
 	m.loading = true
-	if got, _ := m.renderMessageBlock(0, streaming, layout.GetViewWidth(m.width)); !strings.Contains(got, "Thinking...") || strings.Contains(got, "mid-flight") {
-		t.Errorf("streaming thought should summarize to Thinking...:\n%s", utils.StripANSI(got))
+	if got, _ := m.renderMessageBlock(0, streaming, layout.GetTranscriptWidth(m.width)); !strings.Contains(got, "- Thinking...") || !strings.Contains(utils.StripANSI(got), "mid-flight") {
+		t.Errorf("streaming thought should auto-expand (-) under Thinking...:\n%s", utils.StripANSI(got))
 	}
 
 	m.loading = false
 	done := ChatMessage{Role: "thought", Content: "past", TurnId: 0,
 		ThoughtStart: time.Now().Add(-1500 * time.Millisecond), ThoughtEnd: time.Now()}
-	if got, _ := m.renderMessageBlock(0, done, layout.GetViewWidth(m.width)); !strings.Contains(got, "Thought: 1.5s") || strings.Contains(got, "past") {
-		t.Errorf("finished thought should show its duration:\n%s", utils.StripANSI(got))
+	got, _ := m.renderMessageBlock(0, done, layout.GetTranscriptWidth(m.width))
+	if !strings.Contains(got, "+ Thought: 1.5s") || strings.Contains(utils.StripANSI(got), "past") {
+		t.Errorf("collapsed thought should show the duration header only:\n%s", utils.StripANSI(got))
 	}
 
 	replayed := ChatMessage{Role: "thought", Content: "from history", TurnId: 0}
-	if got, _ := m.renderMessageBlock(0, replayed, layout.GetViewWidth(m.width)); !strings.Contains(got, "Thought") || strings.Contains(got, "from history") {
-		t.Errorf("replayed thought should show a bare summary:\n%s", utils.StripANSI(got))
+	if got, _ := m.renderMessageBlock(0, replayed, layout.GetTranscriptWidth(m.width)); !strings.Contains(got, "+ Thought") || strings.Contains(utils.StripANSI(got), "from history") {
+		t.Errorf("replayed thought should show a bare + header without content:\n%s", utils.StripANSI(got))
+	}
+}
+
+// TestThoughtStreamingCollapsesOnClose pins the auto-expand rhythm: the
+// open thought streams its full content under "Thinking...", and once the
+// turn closes (ThoughtEnd stamped, loading off) the same block renders
+// collapsed to the header — all body content gone.
+func TestThoughtStreamingCollapsesOnClose(t *testing.T) {
+	m := newTestModel()
+	vpW := layout.GetTranscriptWidth(m.width)
+	m.loading = true
+	open := ChatMessage{Role: "thought", Content: "step one\nstep two", TurnId: 1, ThoughtStart: time.Now()}
+	got, _ := m.renderMessageBlock(0, open, vpW)
+	if !strings.Contains(utils.StripANSI(got), "step two") {
+		t.Errorf("streaming thought should render its full body:\n%s", utils.StripANSI(got))
+	}
+
+	m.loading = false
+	closed := open
+	closed.ThoughtEnd = time.Now()
+	got, _ = m.renderMessageBlock(1, closed, vpW)
+	plain := utils.StripANSI(got)
+	if strings.Contains(plain, "step one") || strings.Contains(plain, "step two") {
+		t.Errorf("closed thought should collapse to the bare header:\n%s", plain)
+	}
+	if !strings.Contains(plain, "+ Thought") {
+		t.Errorf("closed thought should carry the header:\n%s", plain)
+	}
+}
+
+// TestSidebarShowsSessionTitle pins the Session section's label source: the
+// raw id until the server pushes a title (session_info_update), then the
+// title; switching sessions carries the picker item's title.
+func TestSidebarShowsSessionTitle(t *testing.T) {
+	m := newTestModel()
+	m.inChat = true
+	m.activeSessionID = "acp_1788831515590962986_1"
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	if got := m.View().Content; !strings.Contains(got, "acp_1788831515590962986_1") {
+		t.Errorf("sidebar must fall back to the session id:\n%s", got)
+	}
+
+	m.Update(sessionInfoMsg{title: "PPT 渲染链路调研"})
+	if got := m.View().Content; !strings.Contains(got, "PPT 渲染链路调研") || strings.Contains(got, "acp_1788831515590962986") {
+		t.Errorf("sidebar must prefer the pushed title over the id:\n%s", got)
+	}
+
+	m.Update(sessionLoadedMsg{sessionID: "acp_other", title: "切换来的会话"})
+	if m.sessionTitle != "切换来的会话" {
+		t.Errorf("session switch must carry the picker title, got %q", m.sessionTitle)
+	}
+
+	m.Update(sessionInfoMsg{title: ""})
+	if m.sessionTitle != "切换来的会话" {
+		t.Error("an empty title push must not clear a known title")
+	}
+}
+
+// TestThoughtCollapsedStaysOneRow keeps the collapsed header a single row
+// no matter how long the hidden content is.
+func TestThoughtCollapsedStaysOneRow(t *testing.T) {
+	m := newTestModel()
+	m.loading = false
+	vpW := layout.GetTranscriptWidth(m.width)
+	long := ChatMessage{Role: "thought",
+		Content:      strings.Repeat("这是一段很长的思考内容", 30),
+		TurnId:       1,
+		ThoughtStart: time.Now().Add(-3 * time.Second),
+		ThoughtEnd:   time.Now()}
+	got, _ := m.renderMessageBlock(0, long, vpW)
+	lines := strings.Split(utils.StripANSI(got), "\n")
+	// Collapsed block = one content row + the trailing margin row that
+	// indentedBlock appends.
+	if len(lines) != 2 {
+		t.Fatalf("collapsed thought should be one row + margin, got %d:\n%q", len(lines), lines)
+	}
+	if w := utils.DisplayWidth(lines[0]); w > vpW {
+		t.Errorf("collapsed row width %d exceeds viewport %d: %q", w, vpW, lines[0])
+	}
+}
+
+// ── turn-end timestamps ──
+
+// todayAt builds a wall-clock today at the given local time so the compact
+// "15:04" marker format applies.
+func todayAt(hour, min int) time.Time {
+	y, m, d := time.Now().Date()
+	return time.Date(y, m, d, hour, min, 0, 0, time.Local)
+}
+
+// TestTurnDurationStopsAtTranscriptGap: injected <system-reminder> turns
+// (settings reload, sub-agent results) run with no visible user row; the
+// duration walk-back must stop at the wide gap instead of spanning across
+// to the previous turn's user row (the 4043m16s marker regression).
+func TestTurnDurationStopsAtTranscriptGap(t *testing.T) {
+	m := newTestModel()
+	m.messages = []ChatMessage{
+		{Role: "user", Content: "q1", CreatedAt: todayAt(9, 0)},
+		{Role: "assistant", Content: "a1", CreatedAt: todayAt(9, 1)},
+		// The injected turn: tool + assistant arrive hours later with no
+		// user row — the opener never reaches the transcript.
+		{Role: "tool", ToolName: "settings", ToolStatus: toolDone, CreatedAt: todayAt(15, 0)},
+		{Role: "assistant", Content: "a2", CreatedAt: todayAt(15, 0).Add(18 * time.Second)},
+	}
+	if got := m.turnDuration(3, m.messages[3]); got != 18*time.Second {
+		t.Errorf("gap-bound walk should cover just the visible burst (18s), got %s", got)
+	}
+	// A same-turn wide-but-plausible opener (30m) still measures in full.
+	m.messages = []ChatMessage{
+		{Role: "user", Content: "q1", CreatedAt: todayAt(11, 0)},
+		{Role: "assistant", Content: "a1", CreatedAt: todayAt(11, 30)},
+	}
+	if got := m.turnDuration(1, m.messages[1]); got != 30*time.Minute {
+		t.Errorf("normal turn opener must anchor the duration, got %s", got)
+	}
+	// A zero-timestamp row stops the walk: no fabricated span across it.
+	m.messages = []ChatMessage{
+		{Role: "user", Content: "legacy q"},
+		{Role: "thought", Content: "t", CreatedAt: todayAt(9, 0)},
+		{Role: "assistant", Content: "a", CreatedAt: todayAt(9, 0).Add(4 * time.Second)},
+	}
+	if got := m.turnDuration(2, m.messages[2]); got != 4*time.Second {
+		t.Errorf("legacy zero row should bound the walk, got %s", got)
+	}
+}
+
+// TestTurnEndMarkerRendersPerTurn verifies the opencode-style info row
+// (icon · model · duration) appears under each turn's last message — the
+// boundary rule (next message is the next turn's user prompt) for closed
+// turns and the idle rule for the final turn — and never on the user prompt
+// itself.
+func TestTurnEndMarkerRendersPerTurn(t *testing.T) {
+	m := newTestModel()
+	m.width = 100
+	m.height = 40
+	m.inChat = true
+	m.loading = false
+	m.replaying = false
+	m.messages = []ChatMessage{
+		{Role: "user", Content: "q1", TurnId: 1, CreatedAt: todayAt(10, 0)},
+		{Role: "assistant", Content: "a1", TurnId: 1, CreatedAt: todayAt(10, 5)},
+		{Role: "user", Content: "q2", TurnId: 2, CreatedAt: todayAt(11, 0)},
+		{Role: "assistant", Content: "a2", TurnId: 2, CreatedAt: todayAt(11, 30)},
+	}
+	vpW := layout.GetTranscriptWidth(m.width)
+	if got, _ := m.renderMessageBlock(1, m.messages[1], vpW); !strings.Contains(utils.StripANSI(got), "5m00s") {
+		t.Errorf("turn 1's last message should carry the info row with its duration:\n%s", utils.StripANSI(got))
+	}
+	if got, _ := m.renderMessageBlock(3, m.messages[3], vpW); !strings.Contains(utils.StripANSI(got), "30m00s") {
+		t.Errorf("the final turn's last message should carry the info row when idle:\n%s", utils.StripANSI(got))
+	}
+	if got, _ := m.renderMessageBlock(0, m.messages[0], vpW); strings.Contains(utils.StripANSI(got), "5m00s") {
+		t.Errorf("the user prompt must not carry an info row:\n%s", utils.StripANSI(got))
+	}
+	if got, _ := m.renderMessageBlock(2, m.messages[2], vpW); strings.Contains(utils.StripANSI(got), "30m00s") {
+		t.Errorf("a user prompt opening the next turn must not carry one:\n%s", utils.StripANSI(got))
+	}
+}
+
+// TestTurnEndMarkerHiddenWhileLoading: an in-flight turn's last message has
+// no info row yet; a turn whose boundary message already arrived keeps its
+// row even while the next turn streams.
+func TestTurnEndMarkerHiddenWhileLoading(t *testing.T) {
+	m := newTestModel()
+	m.width = 100
+	m.height = 40
+	m.inChat = true
+	m.loading = true
+	m.replaying = false
+	m.messages = []ChatMessage{
+		{Role: "user", Content: "q1", TurnId: 1, CreatedAt: todayAt(10, 0)},
+		{Role: "assistant", Content: "a1", TurnId: 1, CreatedAt: todayAt(10, 5)},
+		{Role: "user", Content: "q2", TurnId: 2, CreatedAt: todayAt(11, 0)},
+	}
+	vpW := layout.GetTranscriptWidth(m.width)
+	if got, _ := m.renderMessageBlock(1, m.messages[1], vpW); !strings.Contains(utils.StripANSI(got), "5m00s") {
+		t.Errorf("closed turn keeps its info row while the next turn runs:\n%s", utils.StripANSI(got))
+	}
+	if got, _ := m.renderMessageBlock(2, m.messages[2], vpW); strings.Contains(utils.StripANSI(got), "5m00s") {
+		t.Errorf("the in-flight turn's last message must not carry an info row yet:\n%s", utils.StripANSI(got))
+	}
+}
+
+// TestTurnEndMarkerLegacyRowsHidden: legacy replayed rows without a
+// wall-clock never fabricate one — no marker, and heights stay block-only.
+func TestTurnEndMarkerLegacyRowsHidden(t *testing.T) {
+	m := newTestModel()
+	m.width = 100
+	m.height = 40
+	m.inChat = true
+	m.loading = false
+	m.replaying = false
+	m.messages = []ChatMessage{
+		{Role: "user", Content: "q1", TurnId: 1},
+		{Role: "assistant", Content: "a1", TurnId: 1},
+	}
+	vpW := layout.GetTranscriptWidth(m.width)
+	for i, msg := range m.messages {
+		if m.isTurnEndAt(i, msg) {
+			t.Errorf("legacy row %d must not be a turn-end carrier", i)
+		}
+		heights := m.virtualLineHeights(vpW)
+		block, skip := m.renderMessageBlock(i, msg, vpW)
+		if skip {
+			continue
+		}
+		if h := strings.Count(block, "\n") + 1; heights[i] != h {
+			t.Errorf("message %d height %d != rendered %d", i, heights[i], h)
+		}
+	}
+}
+
+// TestStampACPMeta: replay events adopt the stored wall-clock, legacy
+// replayed rows stay zero, and live events are stamped on arrival.
+func TestStampACPMeta(t *testing.T) {
+	m := newTestModel()
+	stored := todayAt(9, 30)
+	m.replaying = true
+	if got := m.stampACPMeta(stored); !got.Equal(stored) {
+		t.Errorf("replay should adopt the stored time, got %v", got)
+	}
+	if got := m.stampACPMeta(time.Time{}); !got.IsZero() {
+		t.Errorf("legacy replayed rows must stay undated, got %v", got)
+	}
+	m.replaying = false
+	if got := m.stampACPMeta(time.Time{}); got.IsZero() {
+		t.Error("live events should be stamped on arrival")
+	}
+	if got := m.stampACPMeta(stored); !got.Equal(stored) {
+		t.Errorf("a carried timestamp must win, got %v", got)
 	}
 }
 
@@ -1296,7 +1682,7 @@ func TestMessageCardsPerRole(t *testing.T) {
 		{Role: "tool", ToolName: "bash", ToolStatus: toolDone, ToolInput: "ls", TurnId: 1},
 		{Role: "error", Content: "boom", TurnId: 1},
 	}
-	vpW := layout.GetViewWidth(100)
+	vpW := layout.GetTranscriptWidth(100)
 	blocks := make([]string, len(m.messages))
 	for i, msg := range m.messages {
 		block, _ := m.renderMessageBlock(i, msg, vpW)
@@ -1335,7 +1721,7 @@ func TestThoughtAndToolTextOnPage(t *testing.T) {
 	m.width = 100
 	m.height = 40
 	m.inChat = true
-	vpW := layout.GetViewWidth(100)
+	vpW := layout.GetTranscriptWidth(100)
 
 	thought := ChatMessage{Role: "thought", Content: "checking the request", TurnId: 1}
 	m.visibleConfig.ExpandThinking = true // expanded: header + body both render
@@ -1365,7 +1751,7 @@ func TestMessageCardPaddingSymmetric(t *testing.T) {
 	m.width = 100
 	m.height = 40
 	m.inChat = true
-	vpW := layout.GetViewWidth(100)
+	vpW := layout.GetTranscriptWidth(100)
 	block, _ := m.renderMessageBlock(0, ChatMessage{Role: "user", Content: "hi", TurnId: 1}, vpW)
 	rows := strings.Split(utils.StripANSI(block), "\n")
 	// The block is pad + text + pad + margin for a one-line body: no top
@@ -1397,7 +1783,7 @@ func TestLongAssistantRowsFitViewport(t *testing.T) {
 	m.messages = []ChatMessage{
 		{Role: "assistant", Content: strings.Repeat("这是一个很长的助手回复片段用于测试换行。", 6), TurnId: 1},
 	}
-	vpW := layout.GetViewWidth(100)
+	vpW := layout.GetTranscriptWidth(100)
 	block, _ := m.renderMessageBlock(0, m.messages[0], vpW)
 	for _, line := range strings.Split(utils.StripANSI(block), "\n") {
 		if vc := visibleCells(line); vc > vpW {
@@ -1506,7 +1892,9 @@ func toggleThoughtLevel(t *testing.T, m *Model) *Model {
 
 func toggleSlash(t *testing.T, m *Model, slash string) *Model {
 	t.Helper()
-	for _, pc := range m.buildPanelCommands() {
+	// The full registry, not the panel list: /toggle_mode is kept out of the
+	// panel but the command itself stays runnable.
+	for _, pc := range allPanelCommands() {
 		if pc.slash == slash {
 			m2, _ := m.executeCommand(pc)
 			return m2.(*Model)
@@ -1591,6 +1979,128 @@ func TestModePanelAppliesViaSetConfigOption(t *testing.T) {
 	}
 	if cmd2 != nil {
 		t.Error("re-picking the current mode must not fire a config command")
+	}
+}
+
+// TestRetryingRowLifecycle: the model_retrying update renders the
+// transient backoff divider at the transcript tail (attempt progress,
+// provider error, countdown); any streamed content clears it — the model
+// is producing again — and the turn-end info row carries the retry count.
+// TestTurnStepsOnMarkerAndSidebar pins the steps plumbing: the finished
+// prompt's kernel turn count (response _meta.turn_count) lands on the
+// turn-end marker ("N steps", alongside the retry segment) and accumulates
+// in the sidebar's session Steps counter.
+func TestTurnStepsOnMarkerAndSidebar(t *testing.T) {
+	m := newTestModel()
+	m.width, m.height = 100, 40
+	m.inChat = true
+	m.messages = []ChatMessage{
+		{Role: "user", Content: "do it", TurnId: 1, CreatedAt: todayAt(10, 0)},
+		{Role: "tool", ToolName: "shell ls", ToolStatus: toolDone, ToolCallID: "t1",
+			TurnId: 1, CreatedAt: todayAt(10, 1)},
+		{Role: "assistant", Content: "done", TurnId: 1, CreatedAt: todayAt(10, 2)},
+	}
+
+	// Mid-turn (loading) no marker renders at all; the render cache is
+	// keyed on the loading flip, mirroring the real turn rhythm.
+	m.loading = true
+	rendered, _ := m.renderMessageBlock(2, m.messages[2], layout.GetTranscriptWidth(m.width))
+	if strings.Contains(utils.StripANSI(rendered), "steps") {
+		t.Fatalf("marker must omit steps while the turn runs:\n%s", utils.StripANSI(rendered))
+	}
+
+	m.Update(promptDoneMsg{steps: 7}) // clears loading, records the count
+	rendered, _ = m.renderMessageBlock(2, m.messages[2], layout.GetTranscriptWidth(m.width))
+	if !strings.Contains(utils.StripANSI(rendered), "7 steps") {
+		t.Fatalf("turn-end marker must carry the step count:\n%s", utils.StripANSI(rendered))
+	}
+	if m.sessionSteps != 7 {
+		t.Errorf("sessionSteps = %d, want 7", m.sessionSteps)
+	}
+
+	// A second turn accumulates.
+	m.Update(promptDoneMsg{steps: 3})
+	if m.sessionSteps != 10 || m.lastTurnSteps != 3 {
+		t.Errorf("steps = %d/%d, want last 3 / session 10", m.lastTurnSteps, m.sessionSteps)
+	}
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	if got := m.View().Content; !strings.Contains(got, "Steps") || !strings.Contains(got, "10") {
+		t.Errorf("sidebar must show the cumulative Steps counter:\n%s", got)
+	}
+
+	// An unknown count (aborted / older peer) accumulates nothing.
+	m.Update(promptDoneMsg{steps: 0})
+	if m.sessionSteps != 10 || m.lastTurnSteps != 3 {
+		t.Errorf("a zero-step done must not touch the counters: %d/%d", m.lastTurnSteps, m.sessionSteps)
+	}
+}
+
+func TestRetryingRowLifecycle(t *testing.T) {
+	m := newTestModel()
+	m.width, m.height = 100, 40
+	m.inChat = true
+	m.messages = []ChatMessage{{Role: "user", Content: "hi", TurnId: 0, CreatedAt: todayAt(10, 0)}}
+
+	if strings.Contains(m.renderVirtualDoc(20), "Retrying") {
+		t.Fatal("retry divider must be absent without a retry")
+	}
+
+	m.Update(retryingMsg{attempt: 2, max: 5, delay: 4 * time.Second,
+		errStr: "429 too many requests", startedAt: time.Now()})
+	doc := utils.StripANSI(m.renderVirtualDoc(20))
+	if !strings.Contains(doc, "Retrying 2/5") || !strings.Contains(doc, "429 too many requests") ||
+		!strings.Contains(doc, "next in") {
+		t.Errorf("retry divider missing or incomplete:\n%s", doc)
+	}
+
+	m.Update(agentMessageMsg{text: "recovered"})
+	if strings.Contains(m.renderVirtualDoc(20), "Retrying") {
+		t.Error("retry divider must clear once the model streams again")
+	}
+
+	m.Update(promptDoneMsg{})
+	m.loading = false
+	// The turn-end info row rides the turn's last message (the assistant).
+	last := len(m.messages) - 1
+	rendered, _ := m.renderMessageBlock(last, m.messages[last], layout.GetTranscriptWidth(m.width))
+	if !strings.Contains(utils.StripANSI(rendered), "2 retries") {
+		t.Errorf("turn-end info row should carry the retry count:\n%s", utils.StripANSI(rendered))
+	}
+}
+
+// TestPendingToolHiddenWhilePermissionOpen guards the approval flow: a tool
+// announced as ACP "pending" renders as a normal row until its permission
+// ask arrives, stays out of the transcript while the dialog is open (the
+// panel itself shows the call), and comes back once the dialog resolves.
+func TestPendingToolHiddenWhilePermissionOpen(t *testing.T) {
+	m := newTestModel()
+	m.width, m.height = 100, 40
+	m.inChat = true
+	m.messages = []ChatMessage{
+		{Role: "user", Content: "install it", TurnId: 1, CreatedAt: todayAt(10, 0)},
+		{Role: "tool", ToolName: "shell bun install", ToolStatus: toolPending,
+			ToolCallID: "tc1", TurnId: 1, CreatedAt: todayAt(10, 1)},
+	}
+
+	doc := utils.StripANSI(m.renderVirtualDoc(20))
+	if !strings.Contains(doc, "shell bun install") {
+		t.Fatalf("pending tool row must render without an open dialog:\n%s", doc)
+	}
+
+	m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
+		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1", Title: "shell bun install"},
+	}})
+	doc = utils.StripANSI(m.renderVirtualDoc(20))
+	if strings.Contains(doc, "shell bun install") {
+		t.Fatalf("pending tool row must be hidden while the dialog is open:\n%s", doc)
+	}
+
+	// Resolving the dialog brings the row back (the follow-up in_progress
+	// update then flips it to running through the same dedupe path).
+	m.permissionReq = nil
+	doc = utils.StripANSI(m.renderVirtualDoc(20))
+	if !strings.Contains(doc, "shell bun install") {
+		t.Fatalf("pending tool row must reappear once the dialog resolves:\n%s", doc)
 	}
 }
 
@@ -1705,15 +2215,18 @@ func TestSessionPanelShowsUpdatedAt(t *testing.T) {
 
 func TestBackendDependentCommandsDisabledWithoutSession(t *testing.T) {
 	m := newTestModel()
-	for _, pc := range m.buildPanelCommands() {
+	// Iterate the full registry: the /toggle_* family is hidden from the
+	// panel but must still be classified correctly for typed input.
+	for _, pc := range allPanelCommands() {
+		enabled := m.commandEnabled(pc)
 		switch pc.action {
 		case actionSessions, actionModels, actionNew, actionUpdateSkills:
-			if pc.enabled {
+			if enabled {
 				t.Errorf("%s should be disabled without a backend", pc.slash)
 			}
 		case actionToggleMode, actionToggleThinking, actionToggleSkill,
 			actionToggleShell, actionToggleToolDetail, actionExit:
-			if !pc.enabled {
+			if !enabled {
 				t.Errorf("%s should always be enabled", pc.slash)
 			}
 		}
@@ -1770,6 +2283,7 @@ func TestSlashDoesNotTriggerMidInput(t *testing.T) {
 // typing there (the sheet never echoes them), and Enter runs the selected
 // command and clears the box.
 func TestSlashSheetTypesIntoInput(t *testing.T) {
+	t.Cleanup(theme.Reset) // the /theme run applies a global palette
 	m := newTestModel()
 	m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
 	if !m.panelOpen || !m.panelFromSlash {
@@ -1780,19 +2294,21 @@ func TestSlashSheetTypesIntoInput(t *testing.T) {
 	}
 	m.Update(tea.KeyPressMsg{Code: 't', Text: "t"})
 	m.Update(tea.KeyPressMsg{Code: 'h', Text: "h"})
-	m.Update(tea.KeyPressMsg{Code: 'i', Text: "i"})
-	m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
-	if got := m.chatTextarea.Value(); got != "/thin" {
-		t.Fatalf("input box = %q, want %q (typing must stay in the box)", got, "/thin")
+	m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
+	m.Update(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
+	if got := m.chatTextarea.Value(); got != "/theme" {
+		t.Fatalf("input box = %q, want %q (typing must stay in the box)", got, "/theme")
 	}
-	if m.panelFilter != "thin" {
-		t.Errorf("filter = %q, want %q (derived from the box)", m.panelFilter, "thin")
+	if m.panelFilter != "theme" {
+		t.Errorf("filter = %q, want %q (derived from the box)", m.panelFilter, "theme")
 	}
 	cmds := m.buildPanelCommands()
-	if len(cmds) != 1 || cmds[0].slash != "/toggle_thinking" {
-		t.Fatalf("filter /thin should leave /toggle_thinking, got %+v", cmds)
+	if len(cmds) != 1 || cmds[0].slash != "/theme" {
+		t.Fatalf("filter /theme should leave /theme, got %+v", cmds)
 	}
 
+	pre := m.themeIdx
 	m2, _ := enterKey(m)
 	mm := m2
 	if mm.panelOpen {
@@ -1804,7 +2320,38 @@ func TestSlashSheetTypesIntoInput(t *testing.T) {
 	if mm.panelFilter != "" {
 		t.Errorf("filter = %q, want empty after execution", mm.panelFilter)
 	}
-	if !mm.visibleConfig.ExpandThinking {
+	if mm.themeIdx != (pre+1)%len(themePresets) {
+		t.Error("enter should have run /theme (cycled)")
+	}
+}
+
+// TestSlashSheetRunsHiddenToggle verifies the /toggle_* family stays
+// typed-runnable even though it is kept out of the command panel: the sheet
+// shows it as a no-match, but Enter falls back to the registry when the
+// typed text names a registered command exactly.
+func TestSlashSheetRunsHiddenToggle(t *testing.T) {
+	m := newTestModel()
+	m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	for _, r := range "toggle_thinking" {
+		m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	if cmds := m.buildPanelCommands(); len(cmds) != 0 {
+		t.Fatalf("hidden toggle must not appear in the sheet, got %+v", cmds)
+	}
+	if got := m.chatTextarea.Value(); got != "/toggle_thinking" {
+		t.Fatalf("input box = %q, want %q", got, "/toggle_thinking")
+	}
+	m2, _ := enterKey(m)
+	if m2.panelOpen {
+		t.Error("enter should close the sheet")
+	}
+	if got := m2.chatTextarea.Value(); got != "" {
+		t.Errorf("enter should clear the input, got %q", got)
+	}
+	if m2.panelFilter != "" {
+		t.Errorf("filter = %q, want empty after execution", m2.panelFilter)
+	}
+	if !m2.visibleConfig.ExpandThinking {
 		t.Error("enter should have run /toggle_thinking (expanded)")
 	}
 }
@@ -1856,6 +2403,54 @@ func TestSlashSheetEnterNoMatchKeepsSheet(t *testing.T) {
 	}
 	if got := mm.chatTextarea.Value(); got != "/zz" {
 		t.Errorf("input box = %q, want %q (kept for editing)", got, "/zz")
+	}
+}
+
+// TestSlashSheetEnterPartialToggleKeepsSheet: a partial toggle name is not a
+// command, so Enter must not run anything — the sheet stays open and the
+// draft stays editable (the registry fallback only fires on an exact match).
+func TestSlashSheetEnterPartialToggleKeepsSheet(t *testing.T) {
+	m := newTestModel()
+	m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	for _, r := range "toggle_t" {
+		m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	m2, _ := enterKey(m)
+	// "/toggle_t" matches only unlisted visibility toggles, so the sheet
+	// stays open with the text kept for editing and nothing fires.
+	if !m2.panelOpen {
+		t.Error("enter on a partial toggle name should keep the sheet open")
+	}
+	if got := m2.chatTextarea.Value(); got != "/toggle_t" {
+		t.Errorf("input box = %q, want %q (kept for editing)", got, "/toggle_t")
+	}
+	if m2.visibleConfig.ExpandThinking {
+		t.Error("partial /toggle must not fire any toggle")
+	}
+}
+
+// TestSlashSheetEnterRunsListedToggleMode pins /toggle_mode's place in the
+// panel: "/toggle" uniquely matches the listed Switch mode command, so
+// enter opens the mode config panel instead of keeping the sheet.
+func TestSlashSheetEnterRunsListedToggleMode(t *testing.T) {
+	m := newTestModel()
+	m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	for _, r := range "toggle" {
+		m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	m2, _ := enterKey(m)
+	// The command ran: the slash sheet is gone (with a live backend the mode
+	// config panel replaces it; without one the panel bails and closes —
+	// either way the sheet itself is not showing), and the input was
+	// consumed.
+	if m2.panelOpen && m2.panelFromSlash {
+		t.Error("enter on the unique listed match should leave the slash sheet")
+	}
+	if got := m2.chatTextarea.Value(); got != "" {
+		t.Errorf("input box = %q, want cleared (command consumed it)", got)
+	}
+	if m2.visibleConfig.ExpandThinking {
+		t.Error("enter on /toggle must not fire a visibility toggle")
 	}
 }
 
@@ -2131,6 +2726,9 @@ func TestRenderKeepStartBudget(t *testing.T) {
 
 func TestToolOutputDefaultFoldsAtFiveLines(t *testing.T) {
 	m := newTestModel()
+	// Detail off (the new default) hides the output entirely; the fold
+	// behavior applies once /toggle_toolcall expands the preview.
+	m.visibleConfig.ShowToolDetail = true
 	var b strings.Builder
 	for i := 0; i < 11; i++ {
 		b.WriteString("line\n")
@@ -2143,6 +2741,16 @@ func TestToolOutputDefaultFoldsAtFiveLines(t *testing.T) {
 	rendered := m.renderMessages()
 	if !strings.Contains(rendered, "… (7 more lines)") {
 		t.Errorf("tool output should fold to %d lines, got:\n%s", defaultToolOutputLines, utils.StripANSI(rendered))
+	}
+	m2 := newTestModel()
+	m2.width, m2.height = 100, 40
+	m2.inChat = true
+	m2.messages = append(m2.messages, ChatMessage{
+		Role: "tool", TurnId: 0, ToolCallID: "t1",
+		ToolName: "view_file", ToolStatus: toolDone, ToolOutput: b.String(),
+	})
+	if got := m2.renderMessages(); strings.Contains(got, "more lines") {
+		t.Errorf("detail off (default) must hide the output preview:\n%s", utils.StripANSI(got))
 	}
 }
 
@@ -2438,7 +3046,8 @@ func TestRenderCacheReusesStableBlocks(t *testing.T) {
 	if len(m.renderCache) != 2 {
 		t.Fatalf("cache entries = %d, want 2", len(m.renderCache))
 	}
-	first := m.renderCache[0].block
+	userSeq := m.messages[0].Seq
+	first := m.renderCache[userSeq].block
 	if first == "" {
 		t.Fatal("user block should be cached")
 	}
@@ -2446,10 +3055,11 @@ func TestRenderCacheReusesStableBlocks(t *testing.T) {
 	// the untouched user message keeps its cached block.
 	m.messages[1].Content = "reply one plus more"
 	m.renderMessages()
-	if m.renderCache[0].block != first {
+	if m.renderCache[userSeq].block != first {
 		t.Error("unchanged message must reuse its cached block")
 	}
-	if m.renderCache[1].block == "" || m.renderCache[1].block == m.renderCache[1].content {
+	asstSeq := m.messages[1].Seq
+	if m.renderCache[asstSeq].block == "" || m.renderCache[asstSeq].block == m.renderCache[asstSeq].content {
 		t.Error("changed message should be restyled")
 	}
 	if len(m.renderCache) != 2 {
@@ -2464,7 +3074,8 @@ func TestRenderCacheVisibilityChangeInvalidates(t *testing.T) {
 		{Role: "assistant", Content: "hi"},
 	}
 	m.renderMessages()
-	before := m.renderCache[0].block
+	thoughtSeq := m.messages[0].Seq
+	before := m.renderCache[thoughtSeq].block
 	if before == "" {
 		t.Fatal("thought block should render by default")
 	}
@@ -2473,7 +3084,7 @@ func TestRenderCacheVisibilityChangeInvalidates(t *testing.T) {
 	if !strings.Contains(utils.StripANSI(out), "secret") {
 		t.Error("expanded thought must render its content")
 	}
-	if m.renderCache[0].skip || m.renderCache[0].block == before {
+	if m.renderCache[thoughtSeq].skip || m.renderCache[thoughtSeq].block == before {
 		t.Error("thought entry should restyle when expansion flips")
 	}
 }
@@ -2654,6 +3265,42 @@ func TestSplitTogglesTwoPaneLayout(t *testing.T) {
 	}
 }
 
+// ── scrollbar gap ──
+
+// TestScrollbarGapColumn keeps one page-background column between the
+// transcript and the scrollbar: the viewport is laid out at
+// GetTranscriptWidth (content minus bar minus gap), the gap strip fills
+// that column, and the three columns still sum exactly to the content
+// width so the bar stays flush with the panel edge.
+func TestScrollbarGapColumn(t *testing.T) {
+	m := newTestModel()
+	upd, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = upd.(*Model)
+	if m.chatViewport.Width() != layout.GetTranscriptWidth(100) {
+		t.Errorf("viewport width = %d, want transcript width %d",
+			m.chatViewport.Width(), layout.GetTranscriptWidth(100))
+	}
+	if got := layout.GetTranscriptWidth(100) + layout.ScrollbarGap + layout.BarWidth; got != layout.GetContentWidth(100) {
+		t.Errorf("transcript %d + gap %d + bar %d = %d, want content width %d",
+			layout.GetTranscriptWidth(100), layout.ScrollbarGap, layout.BarWidth,
+			got, layout.GetContentWidth(100))
+	}
+
+	gap := m.renderScrollbarGap(m.chatViewport.Height())
+	lines := strings.Split(gap, "\n")
+	if len(lines) != m.chatViewport.Height() {
+		t.Fatalf("gap strip rows = %d, want %d", len(lines), m.chatViewport.Height())
+	}
+	for i, ln := range lines {
+		if w := utils.DisplayWidth(ln); w != layout.ScrollbarGap {
+			t.Errorf("gap row %d width = %d, want %d", i, w, layout.ScrollbarGap)
+		}
+		if !strings.Contains(ln, "48;2;0;0;0") {
+			t.Errorf("gap row %d must paint the page background: %q", i, ln)
+		}
+	}
+}
+
 // ── lazy history store (17.2) ──
 
 func TestTrimMessageStoreDropsOldestBeyondBudget(t *testing.T) {
@@ -2685,7 +3332,7 @@ func TestVirtualLineHeightsMatchRenderedBlocks(t *testing.T) {
 		{Role: "thought"},                                // empty thought, idle: hidden in both modes
 	}
 
-	vpW := layout.GetViewWidth(m.width)
+	vpW := layout.GetTranscriptWidth(m.width)
 	heights := m.virtualLineHeights(vpW)
 
 	// Heights must equal the real rendered block heights: the virtual
@@ -2723,29 +3370,37 @@ func TestVirtualDocStylesOnlyVisibleWindow(t *testing.T) {
 		t.Fatalf("cache entries = %d, want 6 (height measurement styles all)", len(m.renderCache))
 	}
 	lines := strings.Split(doc, "\n")
-	heights := m.virtualLineHeights(layout.GetViewWidth(m.width))
-	total := 0
+	heights := m.virtualLineHeights(layout.GetTranscriptWidth(m.width))
+	total := layout.TranscriptTopPad
 	for _, h := range heights {
 		total += h
 	}
 	if len(lines) != total {
-		t.Fatalf("doc rows = %d, want %d (sum of exact heights)", len(lines), total)
+		t.Fatalf("doc rows = %d, want %d (top pad + sum of exact heights)", len(lines), total)
 	}
-	// Message 0's height is 4 ([pad, text, pad, margin]) and the window is
-	// 4 rows: the whole block renders inside the window — rows 0-2 carry
-	// the rail (row 0 is the top pad), row 3 is the blank bottom margin —
-	// and everything below is placeholder filler.
-	for i := 0; i < 3; i++ {
+	// The doc opens with the top pad: blank page rows, no card rail. The
+	// window then shows the card's first rows (rail, text, rail), its blank
+	// bottom margin, and placeholder filler for everything after.
+	for i := 0; i < layout.TranscriptTopPad; i++ {
+		plain := utils.StripANSI(lines[i])
+		if strings.Contains(plain, "┃") || strings.Contains(plain, "┆") {
+			t.Errorf("top pad row %d should be a blank page row:\n%q", i, plain)
+		}
+	}
+	for i := layout.TranscriptTopPad; i < layout.TranscriptTopPad+3; i++ {
 		if !strings.Contains(lines[i], "┃") {
 			t.Errorf("in-window row %d should be a real card row:\n%q", i, lines[i])
 		}
 	}
-	if strings.TrimSpace(utils.StripANSI(lines[3])) != "" {
-		t.Errorf("row 3 should be the blank bottom margin:\n%q", lines[3])
+	if strings.TrimSpace(utils.StripANSI(lines[layout.TranscriptTopPad+3])) != "" {
+		t.Errorf("row %d should be the blank bottom margin:\n%q",
+			layout.TranscriptTopPad+3, lines[layout.TranscriptTopPad+3])
 	}
-	for i := 4; i < len(lines); i++ {
-		if !strings.Contains(lines[i], "┆") {
-			t.Errorf("out-of-window row %d should be a placeholder:\n%q", i, lines[i])
+	// Off-window rows are blank bulk: never drawn, they exist only to keep
+	// the doc's row count (scroll clamping, scrollbar) exact.
+	for i := layout.TranscriptTopPad + 4; i < len(lines); i++ {
+		if lines[i] != "" {
+			t.Errorf("out-of-window row %d should be blank bulk:\n%q", i, lines[i])
 		}
 	}
 }
@@ -2758,7 +3413,8 @@ func TestVirtualScrollSupplementsMissingRows(t *testing.T) {
 	m.chatViewport.SetHeight(4)
 
 	m.renderVirtualDoc(4) // height measurement styles every message once
-	first := m.renderCache[0].block
+	userSeq := m.messages[0].Seq
+	first := m.renderCache[userSeq].block
 	if first == "" {
 		t.Fatal("message 0 should be styled at the top")
 	}
@@ -2776,7 +3432,7 @@ func TestVirtualScrollSupplementsMissingRows(t *testing.T) {
 		t.Fatalf("offset = %d, want 6", m.chatViewport.YOffset())
 	}
 	m.feedViewport(4)
-	if m.renderCache[0].block != first {
+	if m.renderCache[userSeq].block != first {
 		t.Error("exited message must reuse its cached block, not restyle")
 	}
 	// The refeed at offset 6 must show real rows for the newly revealed
@@ -2794,21 +3450,227 @@ func TestVirtualDocUniformRowWidthAndTotal(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		m.messages = append(m.messages, ChatMessage{Role: "user", Content: "message " + strconv.Itoa(i)})
 	}
-	vpW := layout.GetViewWidth(m.width)
+	vpW := layout.GetTranscriptWidth(m.width)
 	m.chatViewport.SetHeight(5)
 	doc := m.renderVirtualDoc(5)
+	// Visible rows (styled blocks, gutter filler) are exactly vpW so
+	// bubbles never soft-wraps the line↔row mapping; off-window bulk rows
+	// are blank (never drawn) and must stay empty for the same reason.
 	for i, l := range strings.Split(doc, "\n") {
-		if w := utils.DisplayWidth(l); w != vpW {
-			t.Errorf("doc row %d width = %d, want %d (uniform, no soft-wrap)", i, w, vpW)
+		if w := utils.DisplayWidth(l); w != vpW && w != 0 {
+			t.Errorf("doc row %d width = %d, want %d or blank bulk (no soft-wrap)", i, w, vpW)
 		}
 	}
 	m.chatViewport.SetContent(doc)
-	want := 0
+	want := layout.TranscriptTopPad
 	for _, h := range m.virtualLineHeights(vpW) {
 		want += h
 	}
 	if got := m.chatViewport.TotalLineCount(); got != want {
-		t.Errorf("viewport total = %d, want %d (exact rendered rows)", got, want)
+		t.Errorf("viewport total = %d, want %d (top pad + exact rendered rows)", got, want)
+	}
+}
+
+// TestVirtualDocTopPad: the transcript document opens with blank page rows
+// above the first message block, so the list never touches the viewport's
+// top edge, and scroll-to-message jumps (virtualPrefixLines) point at the
+// message's first row in document coordinates.
+func TestVirtualDocTopPad(t *testing.T) {
+	m := newTestModel()
+	m.messages = append(m.messages, ChatMessage{Role: "user", Content: "first"})
+	m.chatViewport.SetHeight(4)
+	doc := m.renderVirtualDoc(4)
+	lines := strings.Split(utils.StripANSI(doc), "\n")
+	if len(lines) < layout.TranscriptTopPad+1 {
+		t.Fatalf("doc rows = %d, want at least %d", len(lines), layout.TranscriptTopPad+1)
+	}
+	for i := 0; i < layout.TranscriptTopPad; i++ {
+		if strings.TrimSpace(lines[i]) != "" {
+			t.Errorf("top pad row %d should be blank, got %q", i, lines[i])
+		}
+	}
+	if !strings.Contains(lines[layout.TranscriptTopPad], "┃") {
+		t.Errorf("the first message block should start right below the pad:\n%q", lines[layout.TranscriptTopPad])
+	}
+	if got := m.virtualPrefixLines(0); got != layout.TranscriptTopPad {
+		t.Errorf("virtualPrefixLines(0) = %d, want %d", got, layout.TranscriptTopPad)
+	}
+}
+
+// ── /compact ──
+
+// TestCompactCommandRegistered keeps the server-side control command
+// reachable from the palette.
+func TestCompactCommandRegistered(t *testing.T) {
+	for _, pc := range allPanelCommands() {
+		if pc.slash == "/compact" && pc.action == actionCompact {
+			return
+		}
+	}
+	t.Error("/compact should be registered in the command panel")
+}
+
+// TestCompactCommandGuards: the command refuses without a backend, without
+// an active session, and while a turn is in flight.
+func TestCompactCommandGuards(t *testing.T) {
+	m := newTestModel()
+	upd, _ := m.executeCommand(panelCommand{slash: "/compact", action: actionCompact})
+	m = upd.(*Model)
+	if m.compacting || m.statusText != "Backend not connected" {
+		t.Errorf("nil backend must refuse, got %q", m.statusText)
+	}
+
+	m.acpSession = testAcpSession(t)
+	upd, _ = m.executeCommand(panelCommand{slash: "/compact", action: actionCompact})
+	m = upd.(*Model)
+	if m.compacting || m.statusText != "No active session to compact" {
+		t.Errorf("no session must refuse, got %q", m.statusText)
+	}
+
+	m.activeSessionID = "s1"
+	m.loading = true
+	upd, _ = m.executeCommand(panelCommand{slash: "/compact", action: actionCompact})
+	m = upd.(*Model)
+	if m.compacting || m.statusText != "Wait for the current turn to finish" {
+		t.Errorf("in-flight turn must refuse, got %q", m.statusText)
+	}
+}
+
+// TestCompactCommandLifecycle: the action enters the compacting state, the
+// round-trip's textual echo stays out of the transcript (the compact block
+// is the display), and prompt_done clears the state.
+func TestCompactCommandLifecycle(t *testing.T) {
+	m := newTestModel()
+	m.width, m.height = 100, 40
+	m.inChat = true
+	m.acpSession = testAcpSession(t)
+	m.activeSessionID = "s1"
+
+	upd, _ := m.executeCommand(panelCommand{slash: "/compact", action: actionCompact})
+	m = upd.(*Model)
+	if !m.compacting || !m.loading || m.statusText != "Compacting context..." {
+		t.Fatalf("compact should start, got compacting=%v loading=%v status=%q",
+			m.compacting, m.loading, m.statusText)
+	}
+
+	upd, _ = m.Update(agentMessageMsg{text: "Manual context compaction complete.\n"})
+	m = upd.(*Model)
+	if len(m.messages) != 0 {
+		t.Errorf("compact response must not append transcript messages, got %d", len(m.messages))
+	}
+
+	upd, _ = m.Update(promptDoneMsg{})
+	m = upd.(*Model)
+	if m.compacting || m.loading {
+		t.Error("prompt_done should end the compacting state")
+	}
+}
+
+// ── compaction block ──
+
+// TestCompactBlockTwoStates pins the divider two-state display: the running
+// pass shows the warning label riding a full-width rule (idempotently —
+// duplicate compacting updates never append a second block), and the
+// settled pass shows counts, freed tokens and duration on the same rule.
+func TestCompactBlockTwoStates(t *testing.T) {
+	m := newTestModel()
+	m.width, m.height = 100, 40
+	m.inChat = true
+	vpW := layout.GetTranscriptWidth(m.width)
+
+	upd, _ := m.Update(contextCompactingMsg{totalMessages: 12})
+	m = upd.(*Model)
+	if len(m.messages) != 1 || m.messages[0].Role != "compact" {
+		t.Fatalf("compacting should append one compact block, got %d", len(m.messages))
+	}
+	got, _ := m.renderMessageBlock(0, m.messages[0], vpW)
+	plain := utils.StripANSI(got)
+	if !strings.Contains(plain, "Compacting context...") {
+		t.Errorf("running state should render the header:\n%s", plain)
+	}
+	if cells := visibleCells(plain); cells != vpW {
+		t.Errorf("compacting divider should span the full transcript width %d, got %d:\n%s", vpW, cells, plain)
+	}
+
+	upd, _ = m.Update(contextCompactingMsg{})
+	m = upd.(*Model)
+	if len(m.messages) != 1 {
+		t.Errorf("duplicate compacting update must not append, got %d blocks", len(m.messages))
+	}
+
+	upd, _ = m.Update(contextCompactedMsg{compressed: 12, freed: 3400})
+	m = upd.(*Model)
+	if m.messages[0].CompactEnd.IsZero() {
+		t.Error("compacted event should stamp the end time")
+	}
+	got, _ = m.renderMessageBlock(0, m.messages[0], vpW)
+	plain = utils.StripANSI(got)
+	if !strings.Contains(plain, "Context compacted") || !strings.Contains(plain, "12 messages") || !strings.Contains(plain, "3400") {
+		t.Errorf("settled state should render the outcome:\n%s", plain)
+	}
+	if cells := visibleCells(plain); cells != vpW {
+		t.Errorf("settled divider should span the full transcript width %d, got %d:\n%s", vpW, cells, plain)
+	}
+}
+
+// TestCenterRuleLayout: the label rides mid-rule with one-space pads, and
+// an overlong label truncates so a dash still fits on each side.
+func TestCenterRuleLayout(t *testing.T) {
+	w := 40
+	got := utils.StripANSI(centerRule("ab", w, theme.TextMute))
+	if utils.DisplayWidth(got) != w || !strings.HasPrefix(got, "─") || !strings.HasSuffix(got, "─") {
+		t.Errorf("rule should span w edge to edge, got %q (%d cells)", got, utils.DisplayWidth(got))
+	}
+	if !strings.Contains(got, " ab ") {
+		t.Errorf("label should be space-padded on the rule, got %q", got)
+	}
+	if got := utils.StripANSI(centerRule("✗ Compaction failed: "+strings.Repeat("x", 80), w, theme.Danger)); utils.DisplayWidth(got) != w {
+		t.Errorf("overlong label should truncate to the rule width, got %q", got)
+	}
+}
+
+// TestCompactBlockFailure: a failed pass renders the error text.
+func TestCompactBlockFailure(t *testing.T) {
+	m := newTestModel()
+	m.width, m.height = 100, 40
+	m.inChat = true
+	m.Update(contextCompactingMsg{})
+	upd, _ := m.Update(contextCompactedMsg{errStr: "gateway timeout"})
+	m = upd.(*Model)
+	got, _ := m.renderMessageBlock(0, m.messages[0], layout.GetTranscriptWidth(m.width))
+	if !strings.Contains(utils.StripANSI(got), "Compaction failed: gateway timeout") {
+		t.Errorf("failure state should render the error:\n%s", utils.StripANSI(got))
+	}
+}
+
+// TestThoughtBodyCompactAndWrapped: the expanded body drops the model's
+// blank lines (reasoning streams \n\n paragraphs) and hard-wraps to the
+// viewport so no row truncates at the right edge.
+func TestThoughtBodyCompactAndWrapped(t *testing.T) {
+	m := newTestModel()
+	m.width, m.height = 100, 40
+	m.inChat = true
+	m.visibleConfig.ExpandThinking = true
+	content := "first para\n\nsecond para follows here\n\n" + strings.Repeat("这是一段很长的思考内容", 20)
+	m.messages = []ChatMessage{{Role: "thought", Content: content, TurnId: 1}}
+	vpW := layout.GetTranscriptWidth(m.width)
+	got, _ := m.renderMessageBlock(0, m.messages[0], vpW)
+
+	lines := strings.Split(utils.StripANSI(got), "\n")
+	if !strings.Contains(lines[1], "first para") || !strings.Contains(lines[2], "second para follows here") {
+		t.Errorf("collapsed body should carry the two lines back to back:\n%q", lines)
+	}
+	for i := 1; i < len(lines)-1; i++ {
+		if strings.TrimSpace(lines[i]) == "" {
+			t.Errorf("body row %d should not be blank (blank lines collapsed):\n%q", i, lines[i])
+		}
+		if w := utils.DisplayWidth(lines[i]); w > vpW {
+			t.Errorf("body row %d width %d exceeds viewport %d", i, w, vpW)
+		}
+	}
+	// The long CJK run wraps into several rows instead of truncating.
+	if len(lines) < 8 {
+		t.Errorf("long content should wrap into multiple rows, got %d rows", len(lines))
 	}
 }
 
@@ -3224,9 +4086,11 @@ func TestSlashSheetWindowAndSelection(t *testing.T) {
 	m := newTestModel()
 	m.panelOpen = true
 	m.panelFromSlash = true
-	// 18 commands exist, but the sheet shows at most maxSheetRows; the
-	// window slides so the selection stays visible.
-	m.panelIdx = len(allPanelCommands()) - 1
+	// 12 commands are listed in the sheet (the /toggle_* family is hidden),
+	// but the sheet shows at most maxSheetRows; the window slides so the
+	// selection stays visible.
+	cmds := m.buildPanelCommands()
+	m.panelIdx = len(cmds) - 1
 	slash := utils.StripANSI(m.renderSlashPanel())
 	rows := 0
 	for _, ln := range strings.Split(slash, "\n") {
@@ -3237,7 +4101,7 @@ func TestSlashSheetWindowAndSelection(t *testing.T) {
 	if rows != maxSheetRows {
 		t.Errorf("windowed sheet shows %d rows, want %d:\n%s", rows, maxSheetRows, slash)
 	}
-	last := allPanelCommands()[len(allPanelCommands())-1].slash
+	last := cmds[len(cmds)-1].slash
 	if !strings.Contains(slash, last) {
 		t.Errorf("selected (last) command %q must be visible in the window:\n%s", last, slash)
 	}

@@ -638,9 +638,12 @@ func (s *AgentServer) SetEmbedding(baseURL, apiKey, model string) {
 	}
 }
 
-// modelIDs returns the registered model ids under modelsMu. SetModel
+// modelIDs returns the registered model ids under modelsMu, sorted. SetModel
 // (wasm runtime_set_model_config) can insert concurrently from a tool
-// goroutine, so all iterations must go through this helper.
+// goroutine, so all iterations must go through this helper. Sorting keeps
+// the /models panel and config options deterministic — map iteration order
+// is randomized per call, which shuffled the list between opens. Same order
+// firstModelIDLocked uses for the default fallback.
 func (s *AgentServer) ModelIDs() []string {
 	s.modelsMu.Lock()
 	defer s.modelsMu.Unlock()
@@ -648,6 +651,7 @@ func (s *AgentServer) ModelIDs() []string {
 	for id := range s.Models {
 		ids = append(ids, id)
 	}
+	sort.Strings(ids)
 	return ids
 }
 
@@ -1546,7 +1550,11 @@ func (s *AgentServer) OnListConfigOptions(ctx context.Context, req openacp.ListC
 
 func (s *AgentServer) buildConfigOptions(sid openacp.SessionId) []openacp.SessionConfigOption {
 	ss := s.getSession(sid)
-	mode := "auto"
+	// The session-less shape (list_config_options at boot) must advertise the
+	// server's real default — hardcoding "auto" here desynced the cold-start
+	// mode picker: the client believed auto was already selected, so picking
+	// auto hit the no-change early return and the first switch did nothing.
+	mode := s.defaultMode()
 	thoughtLevel := "medium"
 	modelID := s.GetDefaultModelID()
 	if ss != nil {
@@ -1999,6 +2007,7 @@ func (s *AgentServer) OnPrompt(ctx context.Context, req openacp.PromptRequest, s
 	ch := agent.RunStream(ctx, oaSession, input)
 	var usage openagent.Usage
 	var stopReason openacp.StopReason
+	turnCount := 0
 
 	for evt := range ch {
 		switch evt.Type {
@@ -2062,7 +2071,6 @@ func (s *AgentServer) OnPrompt(ctx context.Context, req openacp.PromptRequest, s
 					},
 				})
 			}
-
 		case openagent.StreamSkillsUpdated:
 			// reload_skills discovered a new skill set (install/uninstall
 			// on disk). Push the updated catalog to the client so the
@@ -2111,6 +2119,10 @@ func (s *AgentServer) OnPrompt(ctx context.Context, req openacp.PromptRequest, s
 			if evt.Result != nil {
 				usage = evt.Result.Usage
 				stopReason = finishReasonToACP(evt.Result.StopReason)
+				// Kernel loop iterations for this prompt: model↔tool round
+				// trips. Surfaced in the response _meta so the client can
+				// show per-turn step counts.
+				turnCount = evt.Result.TurnCount
 			}
 
 		case openagent.StreamError:
@@ -2150,7 +2162,10 @@ func (s *AgentServer) OnPrompt(ctx context.Context, req openacp.PromptRequest, s
 	if stopReason == "" {
 		stopReason = openacp.StopReasonEndTurn
 	}
-	return &openacp.PromptResponse{StopReason: stopReason, Meta: map[string]any{"mode": ss.Mode()}}, nil
+	return &openacp.PromptResponse{StopReason: stopReason, Meta: map[string]any{
+		"mode":       ss.Mode(),
+		"turn_count": turnCount,
+	}}, nil
 }
 
 // ── Content block conversion ──
@@ -2991,8 +3006,8 @@ func (a *acpApprover) Ask(ctx context.Context, call openagent.ToolCall, def open
 		// ones don't. Cross-session rules are a separate configuration
 		// layer, not a button grant.
 		Options: []openacp.PermissionOption{
-			{OptionID: "allow_once", Name: "Allow Once", Kind: openacp.PermissionAllowOnce},
-			{OptionID: "allow_always", Name: "Allow Always", Kind: openacp.PermissionAllowAlways},
+			{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce},
+			{OptionID: "allow_always", Name: "Allow always", Kind: openacp.PermissionAllowAlways},
 			{OptionID: "reject_once", Name: "Reject", Kind: openacp.PermissionRejectOnce},
 		},
 	})
@@ -3019,7 +3034,7 @@ func (a *acpApprover) Ask(ctx context.Context, call openagent.ToolCall, def open
 	case "allow_once":
 		// Deliberately NOT remembered (ACP allow_once semantics): the
 		// same tool + args asks again next time — a session-level grant
-		// is what "Allow Always" is for.
+		// is what "Allow always" is for.
 		return governance.Decision{Action: governance.Allow, Reason: "allow once"}, nil
 	case "allow_always":
 		// Session-scoped (ACP allow_always semantics): the same tool +

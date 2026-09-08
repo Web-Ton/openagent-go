@@ -1,8 +1,10 @@
 package chat
 
 import (
+	"encoding/json"
 	"fmt"
 	"image/color"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -126,10 +128,16 @@ func (m *Model) renderLeft(geom *viewGeom) string {
 		inputArea = m.renderPermissionPanel(m.getContentWidth()-1, 0)
 		vpHeight := m.chatViewport.Height()
 		sb := m.renderScrollbar(vpHeight)
-		scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.chatViewport.View(), sb)
+		scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.chatViewport.View(), m.renderScrollbarGap(vpHeight), sb)
 		status := m.renderStatus()
+		// Blank separator between the transcript and the panel — the
+		// viewportHeight budget reserves one row for it (mirroring the
+		// normal path's gap above the input box). Without it the last
+		// transcript row sits flush against the panel, and a queued user
+		// card (same blue rail, same surface) reads as an uncovered input
+		// box sliver.
 		return theme.BaseStyle().Width(leftW).Padding(0, 1).Render(
-			lipgloss.JoinVertical(lipgloss.Left, scrollContainer, inputArea, status),
+			lipgloss.JoinVertical(lipgloss.Left, scrollContainer, "", inputArea, status),
 		)
 	}
 
@@ -140,7 +148,7 @@ func (m *Model) renderLeft(geom *viewGeom) string {
 		splitH := m.chatViewport.Height()
 		ctxH := vpH - splitH
 		sb := m.renderScrollbar(splitH)
-		scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.chatViewport.View(), sb)
+		scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.chatViewport.View(), m.renderScrollbarGap(splitH), sb)
 		ctxPane := m.renderSplitPane(ctxH)
 		inputArea = m.renderInput()
 		status := m.renderStatus()
@@ -153,7 +161,7 @@ func (m *Model) renderLeft(geom *viewGeom) string {
 	// Normal: full-height viewport + input + status.
 	vpHeight := m.chatViewport.Height()
 	sb := m.renderScrollbar(vpHeight)
-	scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.chatViewport.View(), sb)
+	scrollContainer := lipgloss.JoinHorizontal(lipgloss.Top, m.chatViewport.View(), m.renderScrollbarGap(vpHeight), sb)
 	inputArea = m.renderInput()
 	status := m.renderStatus()
 	geom.inputTopY = vpH + 1 // viewport + blank row, split or not
@@ -279,21 +287,11 @@ func joinBadges(parts ...string) string {
 }
 
 // renderModeBadge shows the agent's session mode as the input header's
-// first badge, adapting to the modes the agent actually defines: Auto
-// (fully automated) in the theme primary, Manual (approval required) in
-// green, Plan (read-only, plan-first) in cyan. Empty (config options not
-// yet fetched) renders no badge at all.
+// first badge (label + color from modeBadge). Empty (config options not yet
+// fetched) renders no badge at all.
 func (m *Model) renderModeBadge() string {
-	var label string
-	var col color.Color
-	switch m.mode {
-	case "auto":
-		label, col = "Auto", theme.Primary
-	case "manual":
-		label, col = "Manual", theme.Success
-	case "plan":
-		label, col = "Plan", theme.Notify
-	default:
+	label, col := m.modeBadge()
+	if label == "" {
 		return ""
 	}
 	return theme.BaseStyle().Background(theme.BgSurface).Foreground(col).Render(label)
@@ -386,36 +384,37 @@ func (m *Model) renderPlanList(background lipgloss.Style, width int) string {
 	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
-// formatTokens renders a token count compactly for the sidebar: 834,
-// 12.3k, 1.2M (a trailing .0 is trimmed).
+// formatTokens renders a token count with thousands separators for the
+// sidebar: 834, 16,110, 1,234,567.
 func formatTokens(n int) string {
-	compact := func(v float64, suffix string) string {
-		s := strconv.FormatFloat(v, 'f', 1, 64)
-		return strings.TrimSuffix(s, ".0") + suffix
+	s := strconv.Itoa(n)
+	if len(s) <= 3 {
+		return s
 	}
-	switch {
-	case n >= 1_000_000:
-		return compact(float64(n)/1_000_000, "M")
-	case n >= 1_000:
-		return compact(float64(n)/1_000, "k")
-	default:
-		return strconv.Itoa(n)
+	b := make([]byte, 0, len(s)+len(s)/3)
+	for i := 0; i < len(s); i++ {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b = append(b, ',')
+		}
+		b = append(b, s[i])
 	}
+	return string(b)
 }
 
-// contextValue renders the sidebar's context line: "used / window tokens"
-// once usage has been reported, the window alone before the first update.
+// contextValue renders the sidebar's used-token line: "16,110 tokens".
 func (m *Model) contextValue() string {
-	switch {
-	case m.usedTokens > 0 && m.contextSize > 0:
-		return fmt.Sprintf("%s / %s tokens", formatTokens(m.usedTokens), formatTokens(m.contextSize))
-	case m.contextSize > 0:
-		return formatTokens(m.contextSize) + " tokens"
-	case m.usedTokens > 0:
-		return formatTokens(m.usedTokens) + " tokens"
-	default:
-		return "0 tokens"
+	return formatTokens(m.usedTokens) + " tokens"
+}
+
+// contextPercent renders the sidebar's "2% used" line — the used share of
+// the context window, rounded; empty until the model reports the window
+// size.
+func (m *Model) contextPercent() string {
+	if m.contextSize <= 0 {
+		return ""
 	}
+	pct := int(math.Round(float64(m.usedTokens) / float64(m.contextSize) * 100))
+	return fmt.Sprintf("%d%% used", pct)
 }
 
 func (m *Model) renderRight() string {
@@ -427,20 +426,50 @@ func (m *Model) renderRight() string {
 	rightStyle := background.Width(width).Height(m.height).PaddingLeft(1)
 
 	sessionTitle := background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("Session")
-	sessionValue := background.Width(width - 1).Foreground(theme.TextAsh).Render(m.activeSessionID)
+	// Prefer the session's human title (server-generated, pushed via
+	// session_info_update); the raw id is the fallback until one arrives.
+	sessionLabel := m.activeSessionID
+	if m.sessionTitle != "" {
+		sessionLabel = m.sessionTitle
+	}
+	sessionValue := background.Width(width - 1).Foreground(theme.TextAsh).
+		Render(utils.TruncateByWidth(sessionLabel, width-2))
 
 	contextTitle := background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("Context")
-	contextText := background.Width(width - 1).Foreground(theme.TextAsh).Render(m.contextValue())
+	contextLines := []string{
+		contextTitle,
+		background.Width(width - 1).Foreground(theme.TextAsh).Render(m.contextValue()),
+	}
+	// The "2% used" share line only exists once the window size is known.
+	if pct := m.contextPercent(); pct != "" {
+		contextLines = append(contextLines,
+			background.Width(width-1).Foreground(theme.TextAsh).Render(pct))
+	}
 	turnsTitle := background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("Turns")
 	turnsValue := background.Width(width - 1).Foreground(theme.TextAsh).Render(strconv.Itoa(m.promptCount))
 
+	// Session-cumulative kernel steps (model↔tool round trips), summed from
+	// the per-turn counts carried by prompt responses. Live turns only —
+	// replayed history carries no step counts, so the number restarts on
+	// session switch; hidden entirely until the first live turn lands.
+	var stepsLines []string
+	if m.sessionSteps > 0 {
+		stepsLines = []string{
+			background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("Steps"),
+			background.Width(width - 1).Foreground(theme.TextAsh).Render(strconv.Itoa(m.sessionSteps)),
+			"",
+		}
+	}
+
 	todoContent := m.renderPlanList(background, width-1)
-	header := lipgloss.JoinVertical(lipgloss.Left,
+	headerParts := []string{
 		sessionTitle, sessionValue, "",
-		contextTitle, contextText, "",
-		turnsTitle, turnsValue, "",
-		todoContent,
-	)
+	}
+	headerParts = append(headerParts, contextLines...)
+	headerParts = append(headerParts, "", turnsTitle, turnsValue, "")
+	headerParts = append(headerParts, stepsLines...)
+	headerParts = append(headerParts, todoContent)
+	header := lipgloss.JoinVertical(lipgloss.Left, headerParts...)
 
 	workDirTitle := background.Width(width - 1).Foreground(theme.TextNormal).Bold(true).Render("WorkDir")
 	workDirValue := background.Width(width - 1).Foreground(theme.TextAsh).Render(m.workDir)
@@ -456,6 +485,22 @@ func (m *Model) renderRight() string {
 	space := strings.Repeat("\n", spacesH)
 	return rightStyle.
 		Render(lipgloss.JoinVertical(lipgloss.Left, header, space, footer))
+}
+
+// renderScrollbarGap renders the one-column page-background strip between
+// the transcript viewport and the scrollbar, so message blocks never touch
+// the bar (the viewport width already reserves this column via
+// layout.GetTranscriptWidth).
+func (m *Model) renderScrollbarGap(height int) string {
+	if height <= 0 {
+		return ""
+	}
+	cell := theme.BaseStyle().Render(" ")
+	lines := make([]string, height)
+	for i := range lines {
+		lines[i] = cell
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *Model) renderScrollbar(height int) string {
@@ -499,7 +544,13 @@ func (m *Model) renderScrollbar(height int) string {
 }
 
 // renderPermissionPanel renders an inline panel (replacing the input area)
-// showing the tool call that needs approval. Bottom-aligned above status.
+// showing the tool call that needs approval, styled after opencode's
+// permission prompt: a warning left rail on the panel background, a
+// two-line header ("⚠ Permission required" over the muted kind icon and
+// tool title), the raw command or path as body detail under a muted label,
+// and the options as horizontal chips on a surface strip with a blank
+// strip row above and below (vertical breathing). The selected chip is
+// filled with the warning color. Bottom-aligned above status.
 func (m *Model) renderPermissionPanel(width, _ int) string {
 	req := m.permissionReq
 	tc := req.ToolCall
@@ -508,49 +559,81 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 		title = "Tool Call"
 	}
 
-	contentW := width
-	contentStyle := theme.BaseStyle().Width(contentW).Background(theme.BgPanel)
+	panel := theme.BaseStyle().Background(theme.BgPanel)
 	yellow := lipgloss.Color("#ffd60a")
-	warnStyle := theme.BaseStyle().Background(theme.BgPanel).Foreground(yellow)
+	warn := theme.BaseStyle().Background(theme.BgPanel).Foreground(yellow)
+	muted := panel.Foreground(theme.TextAsh)
 
-	icon := warnStyle.Render("⚠")
-	allow := warnStyle.Bold(true).Render("allow")
-	space := warnStyle.Render(" ")
-	toolName := warnStyle.Render(title)
-	question := warnStyle.Render("?")
-	headerTitle := contentStyle.Render(lipgloss.JoinHorizontal(lipgloss.Left, icon, space, allow, space, toolName, question))
+	header := lipgloss.JoinVertical(lipgloss.Left,
+		panel.Render(lipgloss.JoinHorizontal(lipgloss.Left,
+			warn.Render("⚠"),
+			panel.Foreground(theme.TextNormal).Render(" Permission required"),
+		)),
+		muted.Render("  "+permissionKindIcon(tc.Kind)+title),
+	)
 
-	// Options: one per line, full width, separator line between them.
-	// Selected option uses Primary foreground + "▶" marker.
-	sep := contentStyle.Foreground(theme.BorderGray).Render(strings.Repeat("─", contentW-1))
-	optionParts := make([]string, 0, len(req.Options)*2)
+	// Body detail: what is actually being approved, per opencode — the
+	// shell command ("$ cmd") or the path in question ("- path") under a
+	// muted label. Skipped when the raw input carries neither.
+	var parts []string
+	parts = append(parts, header)
+	if label, lines, ok := permissionDetail(tc.RawInput, width-6); ok {
+		parts = append(parts, "", muted.Render("   "+label))
+		for _, ln := range lines {
+			parts = append(parts, panel.Foreground(theme.TextNormal).Render("   "+ln))
+		}
+	}
+
+	chipParts := make([]string, 0, len(req.Options)*2)
 	for i, opt := range req.Options {
 		name := opt.Name
 		if name == "" {
 			name = string(opt.OptionID)
 		}
-		marker := "  "
-		optStyle := contentStyle.Foreground(theme.TextAsh)
-		if i == m.permissionSelectedIdx {
-			marker = "▶ "
-			optStyle = contentStyle.Foreground(theme.Primary)
+		if i > 0 {
+			chipParts = append(chipParts, panel.Render("  "))
 		}
-		optionParts = append(optionParts, optStyle.Render(marker+name))
-		if i < len(req.Options)-1 {
-			optionParts = append(optionParts, sep)
+		if i == m.permissionSelectedIdx {
+			chipParts = append(chipParts,
+				theme.BaseStyle().Background(theme.Warning).Foreground(theme.TextInk).Render(" "+name+" "))
+		} else {
+			chipParts = append(chipParts, muted.Render(name))
 		}
 	}
-	optionList := lipgloss.JoinVertical(lipgloss.Left, optionParts...)
+	chips := lipgloss.JoinHorizontal(lipgloss.Left, chipParts...)
 
-	footer := contentStyle.PaddingRight(1).Align(lipgloss.Right).Render(
-		lipgloss.JoinHorizontal(lipgloss.Right,
-			components.RenderCommandTipSurface("↑ ↓", "switch"),
-			components.RenderCommandTipSurface("esc", "cancel"),
-			components.RenderCommandTipSurface("enter", "select"),
-		),
+	tips := lipgloss.JoinHorizontal(lipgloss.Right,
+		components.RenderCommandTipOn("↑ ↓", "switch", theme.BgSurface),
+		components.RenderCommandTipOn("esc", "cancel", theme.BgSurface),
+		components.RenderCommandTipOn("enter", "select", theme.BgSurface),
 	)
+	// Every span of the strip carries the surface background explicitly:
+	// plain spaces between styled segments sit behind an inner ANSI reset,
+	// where the outer style's background never reaches (a black hole in
+	// the middle of the strip). The strip spans the panel edge to edge,
+	// with a full-width blank strip row above and below the chips.
+	strip := theme.BaseStyle().Background(theme.BgSurface)
+	lead, trail := 2, 1
+	mid := width - utils.DisplayWidth(chips) - utils.DisplayWidth(tips) - lead - trail
+	if mid < 2 {
+		mid = 2
+	}
+	footer := lipgloss.JoinHorizontal(lipgloss.Left,
+		strip.Render(strings.Repeat(" ", lead)),
+		chips,
+		strip.Render(strings.Repeat(" ", mid)),
+		tips,
+		strip.Render(strings.Repeat(" ", trail)),
+	)
+	// Vertical breathing: a full-width blank strip row above and below the
+	// chips. The row must be width-1, not width: with the left border,
+	// lipgloss squeezes the content box to Width-1 and word-wraps a
+	// whitespace-only line one column over into nothing — the surface
+	// background collapses with it (the empty style-on-nothing span).
+	blankStrip := strip.Render(strings.Repeat(" ", width-1))
 
-	content := lipgloss.JoinVertical(lipgloss.Left, headerTitle, "", optionList, "", footer)
+	parts = append(parts, "", blankStrip, footer, blankStrip)
+	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
 	borderColor := theme.Warning
 	return theme.BaseStyle().
@@ -560,6 +643,57 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 		BorderBackground(theme.BgPanel).
 		BorderForeground(borderColor).
 		Render(content)
+}
+
+// permissionKindIcon maps the ACP tool kind to opencode's muted kind icon
+// on the title line. ASCII-only: opencode's ←/→ glyphs are East-Asian-
+// ambiguous width and overstrike adjacent text in CJK terminals (same
+// constraint that bans them from the tool rows), so read/edit kinds get no
+// icon rather than a rendering hazard.
+func permissionKindIcon(kind string) string {
+	switch kind {
+	case "execute":
+		return "#"
+	case "fetch":
+		return "%"
+	case "search":
+		return "*"
+	default:
+		return ""
+	}
+}
+
+// permissionDetail extracts the opencode-style body detail from the raw
+// tool arguments: shell-style calls surface the actual command ("$ ..."),
+// path-based calls a Patterns list ("- path"). ok=false when the arguments
+// carry neither, leaving the panel title-only.
+func permissionDetail(raw any, maxW int) (label string, lines []string, ok bool) {
+	if raw == nil {
+		return "", nil, false
+	}
+	// RawInput is typed any on the ACP wire type: normalize to JSON bytes
+	// (json.RawMessage marshals to itself; a decoded map marshals normally).
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return "", nil, false
+	}
+	var args struct {
+		Command json.RawMessage `json:"command"`
+		Path    string          `json:"path"`
+	}
+	if err := json.Unmarshal(b, &args); err != nil {
+		return "", nil, false
+	}
+	if len(args.Command) > 0 {
+		var cmd string
+		if err := json.Unmarshal(args.Command, &cmd); err == nil && cmd != "" {
+			return "Command", []string{"$ " + utils.TruncateByWidth(cmd, maxW)}, true
+		}
+	}
+	if args.Path != "" {
+		return "Patterns", []string{"- " + utils.TruncateByWidth(args.Path, maxW)}, true
+	}
+	return "", nil, false
 }
 
 // panelBox returns the outer (frame) and inner content width for the
