@@ -9,11 +9,11 @@ const (
 	// in the transcript document, so the list never touches the viewport's
 	// top edge.
 	TranscriptTopPad = 1
-	InputHeight  = 2
-	Footerheight = 1
-	Padding      = 1
-	StatusHeight = 1
-	SpaceHeight  = 1
+	InputHeight      = 2
+	Footerheight     = 1
+	Padding          = 1
+	StatusHeight     = 1
+	SpaceHeight      = 1
 )
 
 // Chat
