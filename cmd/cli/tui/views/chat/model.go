@@ -1424,14 +1424,16 @@ func (m *Model) cancelPrompt() {
 
 // ── slash commands & command panel ──
 
-// buildPanelCommands returns the filtered command list for the panel,
-// honouring the current filter and per-command enabled state. Commands kept
-// out of the panel (the /toggle_* family) are never listed; they stay
-// typed-runnable through runSlashCommand.
+// buildPanelCommands returns the filtered command list for the open panel,
+// honouring the current filter and per-command enabled state. The two panels
+// differ in scope: the Ctrl+P palette lists every registered command, while
+// the "/"-docked sheet lists the curated subset — the visibility toggles
+// (/toggle_thinking and friends) stay typed-runnable without cluttering the
+// sheet.
 func (m *Model) buildPanelCommands() []panelCommand {
 	var out []panelCommand
 	for _, pc := range allPanelCommands() {
-		if !pc.panel {
+		if !pc.panel && m.panelFromSlash {
 			continue
 		}
 		if m.panelFilter != "" &&

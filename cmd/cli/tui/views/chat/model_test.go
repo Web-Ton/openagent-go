@@ -299,23 +299,38 @@ func TestPanelCtrlPOpenAndFilter(t *testing.T) {
 // TestPanelHidesToggleFamily guards the /toggle_* commands staying out of
 // the command panel: neither the Ctrl+P palette nor the "/" sheet lists
 // them, but they stay registered so typed input still runs them.
-// TestPanelHidesToggleFamily pins the command-panel listing rule: mode
-// switching is a primary action and stays listed, while the visibility
-// toggles (/toggle_thinking and friends) are typed-runnable only.
-func TestPanelHidesToggleFamily(t *testing.T) {
+// TestPanelScopeBySource pins the two panels' scopes: the Ctrl+P palette
+// lists every registered command (including the visibility toggles), while
+// the "/"-docked sheet lists the curated subset — the toggles stay
+// typed-runnable only there, with /toggle_mode as the listed exception.
+func TestPanelScopeBySource(t *testing.T) {
 	m := newTestModel()
-	var listedMode bool
+
+	m.panelOpen = true
+	m.panelFromSlash = false // Ctrl+P palette
+	palette := map[string]bool{}
+	for _, pc := range m.buildPanelCommands() {
+		palette[pc.slash] = true
+	}
+	for _, want := range []string{"/toggle_thinking", "/toggle_skill", "/toggle_shell", "/toggle_toolcall", "/toggle_linenumbers", "/toggle_mode", "/sessions"} {
+		if !palette[want] {
+			t.Errorf("palette must list %s", want)
+		}
+	}
+
+	m.panelFromSlash = true // "/"-docked sheet
+	listedMode := false
 	for _, pc := range m.buildPanelCommands() {
 		if pc.slash == "/toggle_mode" {
 			listedMode = true
 			continue
 		}
 		if strings.HasPrefix(pc.slash, "/toggle_") {
-			t.Errorf("toggle command %s must not appear in the command panel", pc.slash)
+			t.Errorf("sheet must not list visibility toggle %s", pc.slash)
 		}
 	}
 	if !listedMode {
-		t.Error("/toggle_mode must stay listed in the command panel")
+		t.Error("/toggle_mode must stay listed in the slash sheet")
 	}
 	if !registeredSlash("/toggle_thinking") {
 		t.Error("/toggle_thinking must stay registered for typed input")
