@@ -974,24 +974,34 @@ func (s *AgentServer) loadTotalTokens(ctx context.Context, sessionID string) int
 }
 
 // mcpConn is one configured MCP server's connect outcome: the live session
-// when the connect succeeded (nil otherwise) paired with the wire status
-// snapshot pushed to the client as "mcp_servers_update". Pairing them in
-// one value replaces the former parallel sessions/statuses slices, whose
-// index alignment held only by convention (statuses also carried failures).
+// when the connect succeeded (nil otherwise). Name/Type for the wire
+// snapshot come from cfg; the outcome is just connected + a tool count.
+// Pairing them in one value replaces the former parallel
+// sessions/statuses slices, whose index alignment held only by convention
+// (statuses also carried failures).
 type mcpConn struct {
-	sess   *mcp.Session            // nil when the connect failed
-	status openacp.McpServerStatus // name/type/outcome (+ tool count when listed)
+	cfg       openacp.McpServer // merged server config; name/type source
+	sess      *mcp.Session      // nil when the connect failed
+	connected bool
+	tools     int // imported tool count (listed once at connect)
 }
 
 // mcpConns is a session's set of per-server connect outcomes, in config
 // order (failures included).
 type mcpConns []*mcpConn
 
-// statuses flattens the per-connection snapshots for the wire.
+// statuses derives the wire snapshots pushed to the client as
+// "mcp_servers_update".
 func (conns mcpConns) statuses() []openacp.McpServerStatus {
 	out := make([]openacp.McpServerStatus, 0, len(conns))
 	for _, c := range conns {
-		out = append(out, c.status)
+		st := openacp.McpServerStatus{Name: c.cfg.Name, Type: c.cfg.Type, Tools: c.tools}
+		if c.connected {
+			st.Status = "connected"
+		} else {
+			st.Status = "failed"
+		}
+		out = append(out, st)
 	}
 	return out
 }
@@ -1011,7 +1021,7 @@ func (s *AgentServer) connectMCP(ctx context.Context, servers []openacp.McpServe
 	var tools []openagent.Tool
 	seen := make(map[string]string) // tool name → server (duplicate detection)
 	for _, cfg := range servers {
-		conn := &mcpConn{status: openacp.McpServerStatus{Name: cfg.Name, Type: cfg.Type, Status: "failed"}}
+		conn := &mcpConn{cfg: cfg}
 		conns = append(conns, conn)
 		sess, err := s.connectOneMCP(ctx, client, cfg)
 		if err != nil {
@@ -1019,7 +1029,7 @@ func (s *AgentServer) connectMCP(ctx context.Context, servers []openacp.McpServe
 			continue
 		}
 		conn.sess = sess
-		conn.status.Status = "connected"
+		conn.connected = true
 		// Name the session so tools are "mcp__<server>__<tool>" — unique
 		// across servers and self-describing to the model.
 		st2, err := sess.Named(cfg.Name).Tools(ctx)
@@ -1027,7 +1037,7 @@ func (s *AgentServer) connectMCP(ctx context.Context, servers []openacp.McpServe
 			mcpWarn("list tools", cfg.Name, err)
 			continue
 		}
-		conn.status.Tools = len(st2)
+		conn.tools = len(st2)
 		for _, t := range st2 {
 			name := t.Definition().Name
 			if owner, dup := seen[name]; dup {
