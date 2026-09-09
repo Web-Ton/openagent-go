@@ -27,8 +27,13 @@ type Config struct {
 	Capabilities Capabilities               `json:"capabilities,omitempty"`
 	Embedding    EmbeddingConfig            `json:"embedding,omitempty"`
 	// DefaultMode is the session mode new sessions start in ("auto",
-	// "manual", "plan"). Empty = "manual" (approval-based safe default).
-	DefaultMode string `json:"default_mode,omitempty" valid:"enum=auto|manual|plan;case=cs"`
+	// "semi-auto", "manual", "plan"). Empty = "manual" (approval-based safe
+	// default).
+	//   auto      — fully automatic, no approval prompts (incl. destructive)
+	//   semi-auto — auto-allow safe calls, prompt for risk_note (destructive)
+	//   manual    — prompt for every tool call
+	//   plan      — read-only planning, no execution
+	DefaultMode string `json:"default_mode,omitempty" valid:"enum=auto|semi-auto|manual|plan;case=cs"`
 	// ContextProviders overrides the backend per capability. A non-empty
 	// OpenViking.Endpoint already switches ALL domains to OpenViking (it
 	// is a whole-context service); set a domain to "builtin" here to keep
@@ -50,9 +55,9 @@ type Config struct {
 // TUIConfig configures the interactive TUI client. All fields optional;
 // empty fields keep the built-in defaults.
 type TUIConfig struct {
-	// Mode is the initial session mode ("auto"|"manual"|"plan"). Empty
-	// falls back to DefaultMode, then "manual" (ApplyDefaults resolves).
-	Mode string `json:"mode,omitempty" valid:"enum=auto|manual|plan;case=cs;skipif=default_mode"`
+	// Mode is the initial session mode ("auto"|"semi-auto"|"manual"|"plan").
+	// Empty falls back to DefaultMode, then "manual" (ApplyDefaults resolves).
+	Mode string `json:"mode,omitempty" valid:"enum=auto|semi-auto|manual|plan;case=cs;skipif=default_mode"`
 	// Suggestions overrides the welcome-page placeholder suggestion list.
 	// Empty = built-in defaults.
 	Suggestions []string `json:"suggestions,omitempty"`

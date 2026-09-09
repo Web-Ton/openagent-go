@@ -220,3 +220,84 @@ func TestApproverNoClientDenies(t *testing.T) {
 		t.Fatalf("action = %s, want Deny (no client)", d.Action)
 	}
 }
+
+// riskCall is a tool call carrying a non-empty risk_note (destructive).
+func riskCall() openagent.ToolCall {
+	return openagent.ToolCall{
+		ID:   "c2",
+		Type: "function",
+		Function: openagent.ToolCallFunction{
+			Name:      "shell",
+			Arguments: `{"command":"rm -rf /tmp/build","risk_note":"deleting build artifacts"}`,
+		},
+	}
+}
+
+func modeFn(m string) func() string { return func() string { return m } }
+
+// TestApproverAutoModeAllowsRisk: auto mode is fully automatic — even a
+// risk_note (destructive) call must Allow without prompting the client.
+func TestApproverAutoModeAllowsRisk(t *testing.T) {
+	a := &acpApprover{
+		client: &fakeClientRequester{}, // would error if prompted, but auto must not prompt
+		modeFn: modeFn("auto"),
+	}
+	d, err := a.Ask(context.Background(), riskCall(), openagent.FunctionDefinition{Name: "shell"}, openagent.Session{})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if d.Action != governance.Allow {
+		t.Fatalf("auto+risk: action = %s, want Allow (fully automatic)", d.Action)
+	}
+}
+
+// TestApproverSemiAutoAllowsSafe: semi-auto auto-allows calls WITHOUT a
+// risk_note — no client prompt.
+func TestApproverSemiAutoAllowsSafe(t *testing.T) {
+	a := &acpApprover{
+		client: &fakeClientRequester{},
+		modeFn: modeFn("semi-auto"),
+	}
+	d, err := a.Ask(context.Background(), sampleCall(), openagent.FunctionDefinition{Name: "read_file"}, openagent.Session{})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if d.Action != governance.Allow {
+		t.Fatalf("semi-auto safe: action = %s, want Allow", d.Action)
+	}
+}
+
+// TestApproverSemiAutoPromptsRisk: semi-auto must prompt for a risk_note
+// call — the client receives a permission request (not auto-allowed).
+func TestApproverSemiAutoPromptsRisk(t *testing.T) {
+	a := &acpApprover{
+		client: &fakeClientRequester{outcome: openacp.RequestPermissionOutcome{
+			Outcome:  openacp.PermissionOutcomeSelected,
+			OptionID: strPtr("allow_once"),
+		}},
+		modeFn: modeFn("semi-auto"),
+	}
+	d, err := a.Ask(context.Background(), riskCall(), openagent.FunctionDefinition{Name: "shell"}, openagent.Session{})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if d.Action != governance.Allow {
+		t.Fatalf("semi-auto risk: action = %s, want Allow (client approved)", d.Action)
+	}
+}
+
+// TestApproverAutoAllowsSafe: auto mode auto-allows safe calls too (the
+// common path — no risk_note, no prompt).
+func TestApproverAutoAllowsSafe(t *testing.T) {
+	a := &acpApprover{
+		client: &fakeClientRequester{},
+		modeFn: modeFn("auto"),
+	}
+	d, err := a.Ask(context.Background(), sampleCall(), openagent.FunctionDefinition{Name: "read_file"}, openagent.Session{})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if d.Action != governance.Allow {
+		t.Fatalf("auto safe: action = %s, want Allow", d.Action)
+	}
+}

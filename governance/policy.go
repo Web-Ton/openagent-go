@@ -198,12 +198,19 @@ func (e *Engine) Evaluate(ctx context.Context, call openagent.ToolCall, def open
 	}
 
 	// 0) Risk-note bypass: if the tool call carries a non-empty risk_note
-	// (shell tool's risk_note param for destructive commands), force human
-	// approval BEFORE any other layer — including "allow all" rules (auto
-	// mode) and remembered "allow always" (Memory layer). A destructive
-	// command (rm -rf, terraform apply) must not silently execute just
-	// because the session is in auto mode or a similar safe command was
-	// remembered.
+	// (shell tool's risk_note param for destructive commands), route to the
+	// human layer BEFORE any other layer — including "allow all" rules and
+	// remembered "allow always" (Memory layer). A destructive command
+	// (rm -rf, terraform apply) must not silently execute just because a
+	// similar safe command was remembered.
+	//
+	// "Route to the human layer" does NOT always mean "prompt the user":
+	// the HumanApprover (acpApprover) decides based on session mode. In auto
+	// mode the approver allows everything (including risk_note) without
+	// prompting; in semi-auto/manual it prompts. The point of this bypass is
+	// to SKIP the Memory layer for risk_note calls — a remembered allow_always
+	// must never auto-execute a destructive command — not to override the
+	// mode decision.
 	if HasRiskNote(call) {
 		emit(openagent.DecisionPolicyRule, openagent.OutcomeAsk, map[string]any{"reason": "risk_note present — forcing approval"})
 		return e.askHuman(ctx, call, def, session, "risk_note present")

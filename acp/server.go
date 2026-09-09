@@ -151,13 +151,14 @@ type AgentServer struct {
 
 	// DefaultMode is the mode new sessions start in; "" = "manual"
 	// (approval-based safe default). Configured via settings
-	// "default_mode": "auto" | "manual" | "plan".
+	// "default_mode": "auto" | "semi-auto" | "manual" | "plan".
 	DefaultMode string
 }
 
 // defaultMode resolves the configured default mode.
 func (s *AgentServer) defaultMode() string {
-	if s.DefaultMode == "auto" || s.DefaultMode == "plan" {
+	switch s.DefaultMode {
+	case "auto", "semi-auto", "plan":
 		return s.DefaultMode
 	}
 	return "manual"
@@ -213,7 +214,7 @@ type agentSession struct {
 	// (applyModeTools); Runtime never calls back into agentSession, so
 	// there is no inversion.
 	modeMu       sync.RWMutex
-	mode         string                          // "auto", "manual", or "plan"
+	mode         string                          // "auto", "semi-auto", "manual", or "plan"
 	previousMode string                          // mode saved when plan was entered; used by exit_plan_mode
 	config       map[openacp.SessionConfigId]any // config option values
 	cancel       context.CancelFunc
@@ -1576,7 +1577,8 @@ func (s *AgentServer) buildConfigOptions(sid openacp.SessionId) []openacp.Sessio
 			Type:         "select",
 			CurrentValue: mode,
 			Options: []openacp.SessionConfigOptValue{
-				{Value: "auto", Name: "Auto", Description: "Fully automated processing (HIGH RISK), AI will NOT seek your approval"},
+				{Value: "auto", Name: "Auto", Description: "Fully automated, AI will NOT seek your approval for any operations (including destructive)"},
+				{Value: "semi-auto", Name: "Semi-Auto", Description: "AI auto-executes safe operations, but seeks your approval for destructive operations"},
 				{Value: "manual", Name: "Manual", Description: "Your approval is required for AI to perform NONE-READ-ONLY operations"},
 				{Value: "plan", Name: "Plan", Description: "Present the plan first, AI will execute it according to the plan"},
 			},
@@ -1625,7 +1627,8 @@ func (s *AgentServer) buildModeState(sid openacp.SessionId) *openacp.SessionMode
 	return &openacp.SessionModeState{
 		CurrentModeID: openacp.SessionModeId(current),
 		AvailableModes: []openacp.SessionMode{
-			{ID: "auto", Name: "Auto", Description: "Fully automated processing (HIGH RISK), AI will NOT seek your approval"},
+			{ID: "auto", Name: "Auto", Description: "Fully automated, AI will NOT seek your approval for any operation (including destructive)"},
+			{ID: "semi-auto", Name: "Semi-Auto", Description: "AI auto-executes safe operations, but seeks your approval for destructive (risk_note) commands"},
 			{ID: "manual", Name: "Manual", Description: "Your approval is required for AI to perform NONE-READ-ONLY operations"},
 			{ID: "plan", Name: "Plan", Description: "Present the plan first, AI will execute it according to the plan"},
 		},
@@ -2481,12 +2484,13 @@ func (s *AgentServer) applyModeTools(sid openacp.SessionId, ss *agentSession, rt
 		rt.SetHumanApprover(nil)
 
 	default:
-		// Auto/manual: full tool set. Auto has no approval prompts (safety
-		// is handled by Guard.in/Guard.out if configured); manual routes
-		// EVERY tool call through the ACP approver — including read-only
-		// tools (no Safety layer, so nothing auto-approves). "Always allow"
-		// decisions still shortcut through the approval memory; handoffs
-		// stay free.
+		// Auto/semi-auto/manual: full tool set. All three route through the
+		// ACP approver — the mode difference is enforced INSIDE acpApprover.Ask:
+		//   auto      — allow everything (no prompts, incl. risk_note)
+		//   semi-auto — allow safe calls, prompt for risk_note (destructive)
+		//   manual    — prompt for every call (incl. read-only)
+		// "Always allow" decisions still shortcut through the approval memory;
+		// handoffs stay free.
 		if s.clientRPC != nil && s.clientCanReadFile() {
 			add = append(add, opentool.NewACPReadFile(s.clientRPC, sid))
 		}
@@ -2973,8 +2977,25 @@ func (a *acpApprover) Ask(ctx context.Context, call openagent.ToolCall, def open
 		return governance.Decision{Action: governance.Deny, Reason: "no approval client configured"}, nil
 	}
 
-	// If the call carries a risk_note (destructive command), mark it in
-	// _meta so the frontend can display a high-risk warning.
+	// Mode-driven auto-allow. The policy engine's risk-note bypass already
+	// routed risk_note calls here via askHuman; the mode decides what happens:
+	//
+	//   auto      — true fully-automatic: allow EVERYTHING, including
+	//               risk_note (destructive) calls. No approval prompts ever.
+	//   semi-auto — allow calls WITHOUT a risk_note; risk_note calls fall
+	//               through to the approval prompt (the old "auto" behavior).
+	//   manual    — everything prompts (no auto-allow branch; falls through).
+	mode := ""
+	if a.modeFn != nil {
+		mode = a.modeFn()
+	}
+	if mode == "auto" {
+		// Fully automatic — no approval for any call, risk_note or not.
+		return governance.Decision{Action: governance.Allow, Reason: "auto mode"}, nil
+	}
+
+	// Fall through to the approval prompt: manual mode (everything prompts),
+	// semi-auto + risk_note, or unknown mode (fail toward asking).
 	var meta map[string]any
 	var params struct {
 		RiskNote string `json:"risk_note"`
@@ -2982,10 +3003,37 @@ func (a *acpApprover) Ask(ctx context.Context, call openagent.ToolCall, def open
 	hasRisk := json.Unmarshal([]byte(call.Function.Arguments), &params) == nil && strings.TrimSpace(params.RiskNote) != ""
 	if hasRisk {
 		meta = map[string]any{"_risk_note": params.RiskNote}
-	} else if a.modeFn != nil && a.modeFn() == "auto" {
-		// Auto mode: auto-allow all calls without a risk_note. risk_note
-		// calls fall through to the normal approval prompt below.
-		return governance.Decision{Action: governance.Allow, Reason: "auto mode"}, nil
+	}
+
+	if mode == "semi-auto" && !hasRisk {
+		// Semi-auto: auto-allow safe calls; risk_note calls prompt.
+		return governance.Decision{Action: governance.Allow, Reason: "semi-auto mode"}, nil
+	}
+
+	// ACP semantics: allow_once = this call only (never remembered),
+	// allow_always = remembered for the session. For shell, the grant
+	// covers the command's atoms and file accesses (all of them must
+	// be remembered to skip approval — see governance.MemoryKeys), so
+	// a changed command or a new file target re-asks while reused
+	// ones don't. Cross-session rules are a separate configuration
+	// layer, not a button grant.
+	//
+	// High-risk (risk_note) calls get only Allow once / Reject — a
+	// destructive command must never be remembered as "allow always"
+	// (that would silently auto-execute the same rm -rf / terraform
+	// apply on every future invocation without prompting).
+	var options []openacp.PermissionOption
+	if hasRisk {
+		options = []openacp.PermissionOption{
+			{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce},
+			{OptionID: "reject_once", Name: "Reject", Kind: openacp.PermissionRejectOnce},
+		}
+	} else {
+		options = []openacp.PermissionOption{
+			{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce},
+			{OptionID: "allow_always", Name: "Allow always", Kind: openacp.PermissionAllowAlways},
+			{OptionID: "reject_once", Name: "Reject", Kind: openacp.PermissionRejectOnce},
+		}
 	}
 
 	resp, err := a.client.RequestPermission(ctx, openacp.RequestPermissionRequest{
@@ -2998,18 +3046,7 @@ func (a *acpApprover) Ask(ctx context.Context, call openagent.ToolCall, def open
 			Status:     "pending",
 			RawInput:   json.RawMessage(call.Function.Arguments),
 		},
-		// ACP semantics: allow_once = this call only (never remembered),
-		// allow_always = remembered for the session. For shell, the grant
-		// covers the command's atoms and file accesses (all of them must
-		// be remembered to skip approval — see governance.MemoryKeys), so
-		// a changed command or a new file target re-asks while reused
-		// ones don't. Cross-session rules are a separate configuration
-		// layer, not a button grant.
-		Options: []openacp.PermissionOption{
-			{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce},
-			{OptionID: "allow_always", Name: "Allow always", Kind: openacp.PermissionAllowAlways},
-			{OptionID: "reject_once", Name: "Reject", Kind: openacp.PermissionRejectOnce},
-		},
+		Options: options,
 	})
 	if err != nil {
 		return governance.Decision{Action: governance.Deny, Reason: "permission request failed: " + err.Error()}, nil
@@ -3042,6 +3079,15 @@ func (a *acpApprover) Ask(ctx context.Context, call openagent.ToolCall, def open
 		// sessions — a cross-session rules layer (settings → governance
 		// Rule) is future work, not a button grant.
 		d := governance.Decision{Action: governance.Allow, Reason: "allow always"}
+		// A risk_note call was not offered "allow always" (only allow_once /
+		// reject), so a client sending allow_always here is either a bug or
+		// a non-compliant client. Destructive commands must never be
+		// remembered — treat it as allow_once (allow this call, do NOT
+		// persist to memory).
+		if hasRisk {
+			d = governance.Decision{Action: governance.Allow, Reason: "allow once (risk_note: allow_always ignored)"}
+			return d, nil
+		}
 		if a.memory != nil {
 			// Multi-key tools (shell command atoms + file accesses,
 			// write target) remember every key — the policy chain later

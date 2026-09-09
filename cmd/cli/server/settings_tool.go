@@ -79,7 +79,7 @@ TYPE RULES (type-mismatched writes are REJECTED before save):
 - mcp_servers.<name>.type: "stdio" (default) | "http" | "sse" (case-sensitive).
 - log.level: "trace" | "debug" | "info" | "warn" | "error" (case-insensitive).
 - telemetry.protocol: "http" | "grpc" (case-insensitive).
-- default_mode/tui.mode: "auto" | "manual" | "plan" (case-sensitive).
+- default_mode/tui.mode: "auto" | "semi-auto" | "manual" | "plan" (case-sensitive).
 - sandbox.network: "host" | "isolated" (case-sensitive).
 
 HOT-RELOAD (no restart): telemetry.*, log.level, provider.* (models), mcp_servers.*, env.
