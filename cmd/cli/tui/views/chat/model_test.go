@@ -2800,6 +2800,35 @@ func TestConfigSetMsgReturnsNotifyCmd(t *testing.T) {
 	}
 }
 
+func TestModeBadgeCoversServerModes(t *testing.T) {
+	m := newTestModel()
+	cases := []struct {
+		mode  string
+		label string
+		col   color.Color
+	}{
+		{"auto", "Auto", theme.Primary},
+		{"semi-auto", "Semi-Auto", theme.Warning},
+		{"manual", "Manual", theme.Success},
+		{"plan", "Plan", theme.Notify},
+	}
+	for _, c := range cases {
+		m.mode = c.mode
+		label, col := m.modeBadge()
+		if label != c.label {
+			t.Errorf("mode %q badge = %q, want %q", c.mode, label, c.label)
+		}
+		if col != color.Color(c.col) {
+			t.Errorf("mode %q badge color = %v, want %v", c.mode, col, c.col)
+		}
+	}
+	// Unknown non-empty modes surface the raw value in normal text.
+	m.mode = "mystery"
+	if label, col := m.modeBadge(); label != "mystery" || col != color.Color(theme.TextNormal) {
+		t.Errorf("unknown mode badge = %q %v, want raw value in normal text", label, col)
+	}
+}
+
 func TestPlanMsgPopulatesEntries(t *testing.T) {
 	m := newTestModel()
 	upd, _ := m.Update(planMsg{entries: []openacp.PlanEntry{

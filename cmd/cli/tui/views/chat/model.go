@@ -87,8 +87,9 @@ type Model struct {
 	// view switches immediately without waiting for the ACP session ID.
 	inChat bool
 
-	// mode is the current session mode ("auto" | "manual" | "plan"). Shown as
-	// a badge in the input header; manual is the server default.
+	// mode is the current session mode ("auto" | "semi-auto" | "manual" |
+	// "plan"). Shown as a badge in the input header; manual is the server
+	// default.
 	mode string
 
 	// logoColor / logoGradient drive the welcome-page logo coloring from
@@ -534,8 +535,8 @@ func isSkillTool(name string) bool {
 
 // NewModel builds a chat model. ver is shown in the footer/sidebar; name is
 // the agent name (used for ACP client identity); mode is the initial session
-// mode ("auto"|"manual"|"plan"); logoColor/logoGradient drive the welcome
-// logo coloring.
+// mode ("auto"|"semi-auto"|"manual"|"plan"); logoColor/logoGradient drive the
+// welcome logo coloring.
 func NewModel(ctx context.Context, cancel context.CancelFunc, workDir, ver, mode, logoColor string, logoGradient []string) *Model {
 	if mode == "" {
 		mode = "manual"
@@ -2845,12 +2846,16 @@ func (m *Model) turnDuration(i int, msg ChatMessage) time.Duration {
 }
 
 // modeBadge returns the session mode label and its badge color (Auto
-// primary, Manual green, Plan notify). An unknown non-empty mode falls back
-// to the raw value in normal text, an empty mode to "" (no badge).
+// primary, Manual green, Plan notify, Semi-Auto warning — it auto-allows
+// safe calls but still prompts for destructive ones). An unknown non-empty
+// mode falls back to the raw value in normal text, an empty mode to ""
+// (no badge).
 func (m *Model) modeBadge() (string, color.Color) {
 	switch m.mode {
 	case "auto":
 		return "Auto", theme.Primary
+	case "semi-auto":
+		return "Semi-Auto", theme.Warning
 	case "manual":
 		return "Manual", theme.Success
 	case "plan":
