@@ -16,59 +16,20 @@
   如果 openagent-go 对你有帮助，请在 GitHub 上点个 ⭐！
 </div>
 
-## 特性
-
-- **全插件架构** — 每个组件都是接口：Model、Memory、Tools、Guards、Approver、Hooks、Observer
-- **ACP v1 协议** — 完整的 Agent Client Protocol 实现，基于 stdio（JSON-RPC 2.0）。可用任何 ACP 客户端（VSCode 插件、Zed 等）
-- **Plan 模式** — `plan_create`/`plan_update` 工具让 agent 将复杂任务分解为结构化步骤，实时追踪进度
-- **多智能体团队** — agent 之间通过 `transfer_to_*` 工具交接任务；每个 agent 有独立的记忆、工具和守卫
-- **多智能体编排** — LLM 驱动的 DAG 分解、并行执行和自动重规划（`orchestrate/`）
-- **SSE 流式输出** — 实时逐 token 渲染，支持 reasoning 展示、工具调用卡片
-- **结构化工具结果** — `ToolResult` 携带内容/JSON/错误/截断状态；超长输出自动落盘（按行包装、read/grep 可读），不淹没模型上下文
-- **审批策略引擎** — 分层策略链（规则 → 安全 → 审批记忆 → 人工），支持参数编辑和跨重启的 "始终允许" 决策
-- **自我进化** — LLM 提取器将完成的对话转化为持久知识，在后续会话中召回
-- **三层记忆系统** — Working（token 驱动）、Compressed（LLM 增量摘要，`summarizer/`）、Archive（向量/关键词检索，永不删除）；三层均可插拔 Provider，含远程 OpenViking 上下文数据库
-- **沙箱环境** — 原生 OS 级别隔离（Linux bwrap、macOS Seatbelt），安全执行 shell、文件、网络操作
-- **WASM 插件** — Agent 级：`agent:tools` 和 `agent:observers` 接入工具/观测器管线。CLI 级：`cli:settings`、`cli:commands`、`cli:observers`、`cli:http`，用于设置注入、命令扩展、生命周期监控和自定义 HTTP 路由。任意插件均可声明 cron 定时任务。
-- **静态上下文配置** — `AGENTS.md`（工作规则）和 `SOUL.md`（性格与底线），支持用户级和项目级覆盖
-- **Slash 命令** — 内置 `/help`、`/mode`、`/model`、`/compact`、`/context`、`/cwd`、`/clear`、`/rename`、`/sessions`，通过 `slash/` 注册表扩展
-- **完整 CLI** — `openagent`，cobra 命令、配置驱动模型、keyring 密钥管理、WASM 插件运行时
-- **IM 频道** — 飞书/Lark（WebSocket，卡片式流式输出：Markdown 渲染、工具调用卡片，一键扫码创建应用，内嵌审批按钮、/clear 和 /mode 命令）、个人微信（腾讯 ilinkai 官方通道，扫码登录 + 配对码，/clear 命令）、企业微信（官方长连接，原生流式回复，扫码自动创建机器人，/clear 命令）
-- **RunHooks 状态传递** — Start/End 回调共享不透明状态，OTEL 正确嵌套 span，slog 精确计时
-- **动态上下文** — 会话级 plan 状态和 mode 指令每轮自动注入 prompt
-
 ## 快速开始
 
 **前置条件：** Go 1.26.4+ 和一个 OpenAI 兼容的 API key。
 
 ```bash
-# 编译 CLI
-go build -o openagent ./cmd/cli/
+# 编译（设置 OPENAGENT_BINARY_NAME 可自定义二进制标识）
+./build.sh
+# 或: OPENAGENT_BINARY_NAME=myagent ./build.sh
 
-# 查看版本号
-./openagent -v
-
-# ACP 模式（stdio — 配合 VSCode/Zed ACP 插件使用）
+# ACP 模式 — 配合 VSCode/Zed ACP 插件使用
 ./openagent serve --acp
 
-# REST 模式（HTTP + SSE）
-./openagent serve --port 8080
-
-# 一次性流式对话
-./openagent run "你好，请介绍一下你自己"
-
-# 启用 OS 原生沙箱执行 shell 命令
-./openagent serve --sandbox --port 8080
-
-# 按需开关能力（默认：memory/summarizer/skills/mcp/embedder 开，guard/approver 关）
-./openagent serve --guard on --approver on
-
-# 静默所有日志输出
-./openagent serve -q --port 8080
-
-# 管理系统密钥环里
-./openagent keyring set mykey keyvalue
-./openagent keyring get mykey
+# TUI 模式 — 终端交互式聊天
+./openagent tui
 ```
 
 ### 配置
@@ -111,8 +72,6 @@ export BOCHA_API_KEY=<你的-key>   # 在 https://open.bochaai.com 获取
 
 将 agent 接入飞书（Lark），支持群聊、私聊、Markdown 卡片渲染、流式输出。
 
-<img src=".github/images/feishu-bot-effect.jpg" alt="飞书机器人对话效果" width="750" />
-
 **首次使用（无需凭据）：**
 
 ```bash
@@ -120,8 +79,6 @@ export BOCHA_API_KEY=<你的-key>   # 在 https://open.bochaai.com 获取
 ```
 
 终端会出现二维码。打开飞书 App 扫码，确认创建应用即可。SDK 会自动创建机器人应用并配置好权限（`im:message`、`im:message:send_as_bot`、`im.message.receive_v1` 事件、`card.action.trigger` 审批/模式按钮回调），凭据保存在本地。
-
-![首次使用 - 扫码创建应用](.github/images/feishu-first-login.jpg)
 
 **如果已有应用，在 `settings.json` 中配置：**
 
@@ -146,8 +103,6 @@ export BOCHA_API_KEY=<你的-key>   # 在 https://open.bochaai.com 获取
 ```
 
 `--channel` flag 是必须的 — 仅配置 settings.json 不会自动启动 bot。如果凭据已在 settings.json 中，启动时会跳过扫码步骤。
-
-![已有应用 - 带凭据启动](.github/images/feishu-subsequent-login.jpg)
 
 **凭据解析优先级：**
 
@@ -319,6 +274,27 @@ OpenViking 是一个上下文数据库，提供服务端记忆、技能和资源
 ```
 
 `context_providers` 对 `memory`、`skill`、`resource` 各域可设为 `"builtin"` 或 `"openviking"`。留空 = 跟随 endpoint 默认值。
+
+## 特性
+
+- **全插件架构** — 每个组件都是接口：Model、Memory、Tools、Guards、Approver、Hooks、Observer
+- **ACP v1 协议** — 完整的 Agent Client Protocol 实现，基于 stdio（JSON-RPC 2.0）。可用任何 ACP 客户端（VSCode 插件、Zed 等）
+- **Plan 模式** — `plan_create`/`plan_update` 工具让 agent 将复杂任务分解为结构化步骤，实时追踪进度
+- **多智能体团队** — agent 之间通过 `transfer_to_*` 工具交接任务；每个 agent 有独立的记忆、工具和守卫
+- **多智能体编排** — LLM 驱动的 DAG 分解、并行执行和自动重规划（`orchestrate/`）
+- **SSE 流式输出** — 实时逐 token 渲染，支持 reasoning 展示、工具调用卡片
+- **结构化工具结果** — `ToolResult` 携带内容/JSON/错误/截断状态；超长输出自动落盘（按行包装、read/grep 可读），不淹没模型上下文
+- **审批策略引擎** — 分层策略链（规则 → 安全 → 审批记忆 → 人工），支持参数编辑和跨重启的 "始终允许" 决策
+- **自我进化** — LLM 提取器将完成的对话转化为持久知识，在后续会话中召回
+- **三层记忆系统** — Working（token 驱动）、Compressed（LLM 增量摘要，`summarizer/`）、Archive（向量/关键词检索，永不删除）；三层均可插拔 Provider，含远程 OpenViking 上下文数据库
+- **沙箱环境** — 原生 OS 级别隔离（Linux bwrap、macOS Seatbelt），安全执行 shell、文件、网络操作
+- **WASM 插件** — Agent 级：`agent:tools` 和 `agent:observers` 接入工具/观测器管线。CLI 级：`cli:settings`、`cli:commands`、`cli:observers`、`cli:http`，用于设置注入、命令扩展、生命周期监控和自定义 HTTP 路由。任意插件均可声明 cron 定时任务。
+- **静态上下文配置** — `AGENTS.md`（工作规则）和 `SOUL.md`（性格与底线），支持用户级和项目级覆盖
+- **Slash 命令** — 内置 `/help`、`/mode`、`/model`、`/compact`、`/context`、`/cwd`、`/clear`、`/rename`、`/sessions`，通过 `slash/` 注册表扩展
+- **完整 CLI** — `openagent`，cobra 命令、配置驱动模型、keyring 密钥管理、WASM 插件运行时
+- **IM 频道** — 飞书/Lark（WebSocket，卡片式流式输出：Markdown 渲染、工具调用卡片，一键扫码创建应用，内嵌审批按钮、/clear 和 /mode 命令）、个人微信（腾讯 ilinkai 官方通道，扫码登录 + 配对码，/clear 命令）、企业微信（官方长连接，原生流式回复，扫码自动创建机器人，/clear 命令）
+- **RunHooks 状态传递** — Start/End 回调共享不透明状态，OTEL 正确嵌套 span，slog 精确计时
+- **动态上下文** — 会话级 plan 状态和 mode 指令每轮自动注入 prompt
 
 ## 架构
 

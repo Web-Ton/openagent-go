@@ -16,59 +16,20 @@
   If you find openagent-go useful, give it a ⭐ on GitHub!
 </div>
 
-## Features
-
-- **Pluggable architecture** — every component is an interface: Model, Memory, Tools, Guards, Approver, Hooks, Observer
-- **ACP v1 protocol** — full Agent Client Protocol implementation over stdio (JSON-RPC 2.0). Use any ACP-compatible client (VSCode extension, Zed, etc.)
-- **Plan mode** — `plan_create`/`plan_update` tools let the agent decompose complex tasks into structured steps with live progress tracking
-- **Multi-agent team** — agents hand off tasks via `transfer_to_*` tools; each agent has independent memory, tools, and guard
-- **Multi-agent orchestration** — LLM-driven DAG decomposition, parallel execution, and auto-replan via `orchestrate/`
-- **Streaming SSE** — real-time token-by-token output, reasoning display, tool call cards
-- **Structured tool results** — `ToolResult` carries content/JSON/error/truncation; oversized output spills to disk automatically (line-wrapped, read/grep-friendly) instead of flooding the model context
-- **Approval policy engine** — layered chain (rules → safety → approval memory → human) with argument editing and persistent "always allow" decisions
-- **Self-evolution** — LLM extractor turns finished runs into durable knowledge, recalled into later sessions
-- **Three-layer memory** — Working (token-driven), Compressed (LLM incremental summary via `summarizer/`), Archive (vector/keyword searchable, never deleted); all three are provider-pluggable, including a remote OpenViking context database
-- **Sandbox** — native OS-level confinement (Linux bwrap, macOS Seatbelt) for shell, file, and network operations
-- **WASM plugins** — agent-level: `agent:tools` and `agent:observers` plug into the tool/observer pipeline. CLI-level: `cli:settings`, `cli:commands`, `cli:observers`, `cli:http` for settings injection, command extension, lifecycle monitoring, and custom HTTP routes. Any plugin can declare cron-scheduled jobs.
-- **Static context profiles** — `AGENTS.md` (working rules) and `SOUL.md` (persona & limits) with user-level and project-level resolution
-- **Slash commands** — built-in `/help`, `/mode`, `/model`, `/compact`, `/context`, `/cwd`, `/clear`, `/rename`, `/sessions`, extensible via `slash/` registry
-- **Full CLI** — `openagent` with cobra commands, config-driven models, keyring secrets, WASM plugin runtime
-- **IM channels** — Feishu/Lark (WebSocket, card-based streaming output with markdown and tool call cards, one-click QR setup, inline approval buttons, /clear and /mode commands), personal WeChat (Tencent ilinkai channel, QR login with pairing code, /clear command), and WeCom (official long connection, native streaming replies, QR robot auto-creation, /clear command)
-- **RunHooks with state** — start/end callbacks share opaque state; OTEL spans nest, slog logs duration
-- **Dynamic context** — session-level plan status and mode injected into every prompt turn
-
 ## Quick Start
 
 **Prerequisites:** Go 1.26.4+ and an OpenAI-compatible API key.
 
 ```bash
-# Build CLI
-go build -o openagent ./cmd/cli/
+# Build (set OPENAGENT_BINARY_NAME to customize the binary identity)
+./build.sh
+# or: OPENAGENT_BINARY_NAME=myagent ./build.sh
 
-# Show version
-./openagent -v
-
-# ACP mode (stdio — for VSCode/Zed ACP plugins)
+# ACP mode — connect from a VSCode/Zed ACP plugin
 ./openagent serve --acp
 
-# REST mode (HTTP + SSE)
-./openagent serve --port 8080
-
-# One-shot chat with streaming output
-./openagent run "Hello, introduce yourself briefly"
-
-# Enable OS-native sandbox for shell commands
-./openagent serve --sandbox --port 8080
-
-# Toggle capabilities on/off (defaults: memory/summarizer/skills/mcp/embedder on, guard/approver off)
-./openagent serve --guard on --approver on
-
-# Suppress all log output
-./openagent serve -q --port 8080
-
-# Manage secrets in the system keyring
-./openagent keyring set mykey keyvalue
-./openagent keyring get mykey
+# TUI mode — interactive chat in the terminal
+./openagent tui
 ```
 
 ### Configuration
@@ -111,8 +72,6 @@ export BOCHA_API_KEY=<your-key>   # get one at https://open.bochaai.com
 
 Connect your agent to Feishu (Lark) so users can chat with it in IM — group chats, private chats, cards with markdown rendering, and real-time streaming output.
 
-<img src=".github/images/feishu-bot-effect.jpg" alt="Feishu bot in action" width="750" />
-
 **First-time setup (no credentials needed):**
 
 ```bash
@@ -120,8 +79,6 @@ Connect your agent to Feishu (Lark) so users can chat with it in IM — group ch
 ```
 
 A QR code will appear in your terminal. Open Feishu on your phone, scan it, and confirm the app creation. The SDK automatically provisions a bot app with the correct permissions (`im:message`, `im:message:send_as_bot`, `im.message.receive_v1` event, `card.action.trigger` for approval/mode button callbacks) and saves the credentials locally.
-
-![First login - scan QR code](.github/images/feishu-first-login.jpg)
 
 **If you already have an app, configure it in `settings.json`:**
 
@@ -146,8 +103,6 @@ Then run with the flag to enable the channel:
 ```
 
 The `--channel` flag is always required to start the bot — settings.json alone won't auto-start it. If your credentials are in settings.json, the setup step is skipped automatically.
-
-![Subsequent login - start with credentials](.github/images/feishu-subsequent-login.jpg)
 
 **Where credentials are stored:**
 
@@ -319,6 +274,27 @@ To keep a specific domain on local storage while using OpenViking for the rest:
 ```
 
 `context_providers` accepts `"builtin"` or `"openviking"` for each of `memory`, `skill`, `resource`. Empty = follow the endpoint default.
+
+## Features
+
+- **Pluggable architecture** — every component is an interface: Model, Memory, Tools, Guards, Approver, Hooks, Observer
+- **ACP v1 protocol** — full Agent Client Protocol implementation over stdio (JSON-RPC 2.0). Use any ACP-compatible client (VSCode extension, Zed, etc.)
+- **Plan mode** — `plan_create`/`plan_update` tools let the agent decompose complex tasks into structured steps with live progress tracking
+- **Multi-agent team** — agents hand off tasks via `transfer_to_*` tools; each agent has independent memory, tools, and guard
+- **Multi-agent orchestration** — LLM-driven DAG decomposition, parallel execution, and auto-replan via `orchestrate/`
+- **Streaming SSE** — real-time token-by-token output, reasoning display, tool call cards
+- **Structured tool results** — `ToolResult` carries content/JSON/error/truncation; oversized output spills to disk automatically (line-wrapped, read/grep-friendly) instead of flooding the model context
+- **Approval policy engine** — layered chain (rules → safety → approval memory → human) with argument editing and persistent "always allow" decisions
+- **Self-evolution** — LLM extractor turns finished runs into durable knowledge, recalled into later sessions
+- **Three-layer memory** — Working (token-driven), Compressed (LLM incremental summary via `summarizer/`), Archive (vector/keyword searchable, never deleted); all three are provider-pluggable, including a remote OpenViking context database
+- **Sandbox** — native OS-level confinement (Linux bwrap, macOS Seatbelt) for shell, file, and network operations
+- **WASM plugins** — agent-level: `agent:tools` and `agent:observers` plug into the tool/observer pipeline. CLI-level: `cli:settings`, `cli:commands`, `cli:observers`, `cli:http` for settings injection, command extension, lifecycle monitoring, and custom HTTP routes. Any plugin can declare cron-scheduled jobs.
+- **Static context profiles** — `AGENTS.md` (working rules) and `SOUL.md` (persona & limits) with user-level and project-level resolution
+- **Slash commands** — built-in `/help`, `/mode`, `/model`, `/compact`, `/context`, `/cwd`, `/clear`, `/rename`, `/sessions`, extensible via `slash/` registry
+- **Full CLI** — `openagent` with cobra commands, config-driven models, keyring secrets, WASM plugin runtime
+- **IM channels** — Feishu/Lark (WebSocket, card-based streaming output with markdown and tool call cards, one-click QR setup, inline approval buttons, /clear and /mode commands), personal WeChat (Tencent ilinkai channel, QR login with pairing code, /clear command), and WeCom (official long connection, native streaming replies, QR robot auto-creation, /clear command)
+- **RunHooks with state** — start/end callbacks share opaque state; OTEL spans nest, slog logs duration
+- **Dynamic context** — session-level plan status and mode injected into every prompt turn
 
 ## Architecture
 
