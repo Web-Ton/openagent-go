@@ -27,8 +27,8 @@ type Config struct {
 	Capabilities Capabilities               `json:"capabilities,omitempty"`
 	Embedding    EmbeddingConfig            `json:"embedding,omitempty"`
 	// DefaultMode is the session mode new sessions start in ("auto",
-	// "semi-auto", "manual", "plan"). Empty = "manual" (approval-based safe
-	// default).
+	// "semi-auto", "manual", "plan"). Empty = "semi-auto" (auto-allow safe
+	// calls, prompt for destructive).
 	//   auto      — fully automatic, no approval prompts (incl. destructive)
 	//   semi-auto — auto-allow safe calls, prompt for risk_note (destructive)
 	//   manual    — prompt for every tool call
@@ -56,7 +56,7 @@ type Config struct {
 // empty fields keep the built-in defaults.
 type TUIConfig struct {
 	// Mode is the initial session mode ("auto"|"semi-auto"|"manual"|"plan").
-	// Empty falls back to DefaultMode, then "manual" (ApplyDefaults resolves).
+	// Empty falls back to DefaultMode, then "semi-auto" (ApplyDefaults resolves).
 	Mode string `json:"mode,omitempty" valid:"enum=auto|semi-auto|manual|plan;case=cs;skipif=default_mode"`
 	// Suggestions overrides the welcome-page placeholder suggestion list.
 	// Empty = built-in defaults.
@@ -423,14 +423,14 @@ func ApplyDefaults(cfg *Config, settingsPath string) {
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
 	}
-	// TUI mode resolution: tui.mode → default_mode → "manual". Mirrors
+	// TUI mode resolution: tui.mode → default_mode → "semi-auto". Mirrors
 	// acp/server.go defaultMode() so the TUI and server agree on the
-	// safe default when neither is set.
+	// default when neither is set.
 	if cfg.TUI.Mode == "" {
 		cfg.TUI.Mode = cfg.DefaultMode
 	}
 	if cfg.TUI.Mode == "" {
-		cfg.TUI.Mode = "manual"
+		cfg.TUI.Mode = "semi-auto"
 	}
 }
 

@@ -192,11 +192,11 @@ func TestTUIConfigParse(t *testing.T) {
 // Mode fallback chain: tui.mode → default_mode → "manual". ApplyDefaults
 // resolves it so the TUI always ends with a non-empty mode.
 func TestTUIConfigModeFallback(t *testing.T) {
-	// 1. neither set → manual
+	// 1. neither set → semi-auto
 	cfg := &Config{}
 	ApplyDefaults(cfg, isolate(t))
-	if cfg.TUI.Mode != "manual" {
-		t.Fatalf("empty fallback: want manual, got %q", cfg.TUI.Mode)
+	if cfg.TUI.Mode != "semi-auto" {
+		t.Fatalf("empty fallback: want semi-auto, got %q", cfg.TUI.Mode)
 	}
 	// 2. default_mode set, tui.mode empty → inherits default_mode
 	cfg = &Config{DefaultMode: "plan"}

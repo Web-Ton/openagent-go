@@ -149,19 +149,19 @@ type AgentServer struct {
 	// the agent template's SystemPrompts are used as-is.
 	ProfileResolver func(cwd string) []string
 
-	// DefaultMode is the mode new sessions start in; "" = "manual"
-	// (approval-based safe default). Configured via settings
-	// "default_mode": "auto" | "semi-auto" | "manual" | "plan".
+	// DefaultMode is the mode new sessions start in; "" = "semi-auto"
+	// (auto-allow safe calls, prompt for destructive). Configured via
+	// settings "default_mode": "auto" | "semi-auto" | "manual" | "plan".
 	DefaultMode string
 }
 
 // defaultMode resolves the configured default mode.
 func (s *AgentServer) defaultMode() string {
 	switch s.DefaultMode {
-	case "auto", "semi-auto", "plan":
+	case "auto", "semi-auto", "manual", "plan":
 		return s.DefaultMode
 	}
-	return "manual"
+	return "semi-auto"
 }
 
 // ModelConfig stores the original apiKey/baseURL for a registered model,
