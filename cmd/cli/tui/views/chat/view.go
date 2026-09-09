@@ -99,6 +99,23 @@ func (m *Model) View() tea.View {
 			xPos, yPos, xOff, yOff)
 	}
 
+	// Transient toast floats at the top (2 cells down), horizontally
+	// anchored to the message-list area: its right edge aligns with the
+	// transcript viewport's last column, leaving the gap and scrollbar
+	// columns visible. The welcome screen has no message column, so there
+	// it anchors to the terminal's right edge (opencode's own placement).
+	// The toast floats above everything, including the panel scrim; the
+	// status line keeps its persistent content meanwhile.
+	if m.notifyMsg != "" {
+		if toast := m.renderToast(); toast != "" {
+			xOff := -2
+			if m.inChat {
+				xOff = layout.GetLeftWidth(m.width) - 3 - m.width
+			}
+			background = layout.Composite(toast, background, layout.Right, layout.Top, xOff, 2)
+		}
+	}
+
 	// Final pass: force the page background onto every cell that has none,
 	// so lipgloss alignment padding (plain spaces) never shows the
 	// terminal's default color through the UI.
@@ -341,17 +358,49 @@ func (m *Model) renderStatus() string {
 	help = help + components.RenderCommandTip("ctrl+c", "quit")
 	help = help + components.RenderCommandTip("ctrl+p", "commands")
 	m.statusBar.Width = contentWidth
-	if m.notifyMsg != "" {
-		// Transient toast: cyan, replaces the persistent status line until
-		// it auto-clears.
-		m.statusBar.Status = theme.BaseStyle().Foreground(theme.Notify).Render(m.notifyMsg)
-	} else if m.loading {
+	// Toasts no longer ride the status line — they float top-right (see
+	// renderToast) — so the persistent status/spinner always shows.
+	if m.loading {
 		m.statusBar.Status = m.spinner.View() + " " + m.statusText
 	} else {
 		m.statusBar.Status = m.statusText
 	}
 	m.statusBar.Help = help
 	return m.statusBar.View()
+}
+
+// renderToast draws the transient notify toast (notifyMsg) as a floating
+// box mirroring opencode: only left/right vertical bars ("┃"), a surface
+// background, 1×2 padding, and the box hugging its widest line — a width
+// is only imposed (word-wrapping the text) past 60 columns, or the
+// terminal width minus margins. The border keeps the feature-spec toast
+// cyan (theme.Notify); vertical placement is 2 cells from the top and the
+// horizontal anchor comes from the Composite call in View (transcript
+// right edge in chat, terminal right edge on welcome). Empty when the
+// terminal is too narrow to place a readable box.
+func (m *Model) renderToast() string {
+	maxW := min(60, m.width-6)
+	if maxW < 9 {
+		return ""
+	}
+	style := theme.BaseStyle().
+		Background(theme.BgSurface).
+		Padding(1, 2).
+		Border(lipgloss.Border{Left: "┃", Right: "┃"}, false, true, false, true).
+		BorderForeground(theme.Notify)
+	textW := 0
+	for _, line := range strings.Split(m.notifyMsg, "\n") {
+		if w := utils.DisplayWidth(line); w > textW {
+			textW = w
+		}
+	}
+	// lipgloss Width is the block width including padding and border, so a
+	// message whose widest line plus 6 exceeds the cap gets width-capped
+	// (and word-wrapped) instead of rendered at natural size.
+	if textW+6 > maxW {
+		style = style.Width(maxW)
+	}
+	return style.Render(m.notifyMsg)
 }
 
 // renderPlanList draws the agent's plan as a TODO list ("Plans n/m" + status

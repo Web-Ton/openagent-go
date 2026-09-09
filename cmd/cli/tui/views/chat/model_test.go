@@ -2717,9 +2717,72 @@ func TestNotifyToastAutoClears(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("notify must return an auto-clear cmd")
 	}
-	upd, _ := m.Update(notifyClearMsg{})
+	upd, _ := m.Update(notifyClearMsg{id: m.toastID})
 	if upd.(*Model).notifyMsg != "" {
 		t.Error("notifyClearMsg should clear the toast")
+	}
+}
+
+func TestNotifyToastStaleClearIgnored(t *testing.T) {
+	m := newTestModel()
+	m.notify("Session created")
+	m.notify("Copied 12 chars")
+	// The first toast's timer fires late; the second toast must survive it.
+	upd, _ := m.Update(notifyClearMsg{id: m.toastID - 1})
+	if upd.(*Model).notifyMsg != "Copied 12 chars" {
+		t.Errorf("stale clear dropped the newer toast, got %q", upd.(*Model).notifyMsg)
+	}
+}
+
+func TestToastFloatsTopRightNotInStatusBar(t *testing.T) {
+	m := newTestModel()
+	m.inChat = true
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m.notify("Copied 12 chars")
+	lines := strings.Split(utils.StripANSI(m.View().Content), "\n")
+	// Box rows start at y=2; the right edge aligns with the transcript
+	// viewport's last column (GetLeftWidth(120)=80 → viewport cols 1..76),
+	// hugging the message: ┃ + 2sp + text + 2sp + ┃.
+	const boxCol = 76 // last toast column
+	mid := []rune(strings.TrimRight(lines[3], " "))
+	if string(mid[boxCol]) != "┃" {
+		t.Fatalf("toast right edge at col %d = %q, want ┃", boxCol, string(mid[boxCol]))
+	}
+	boxStart := boxCol - 20 // 21-rune box
+	if got := string(mid[boxStart : boxCol+1]); got != "┃  Copied 12 chars  ┃" {
+		t.Errorf("toast box = %q, want shrink-wrapped ┃  Copied 12 chars  ┃", got)
+	}
+	for _, row := range []int{2, 4} {
+		r := []rune(strings.TrimRight(lines[row], " "))
+		if len(r) <= boxCol || string(r[boxCol]) != "┃" {
+			t.Errorf("padding row %d must carry the toast bar at col %d: %q", row, boxCol, lines[row])
+		}
+	}
+	if strings.Contains(lines[len(lines)-1], "Copied") {
+		t.Errorf("status bar must keep persistent content, got %q", lines[len(lines)-1])
+	}
+}
+
+func TestToastWrapsLongMessageAtCap(t *testing.T) {
+	m := newTestModel()
+	m.inChat = true
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m.notify(strings.Repeat("word ", 16)) // 80 columns > 60-cap, word-wraps
+	lines := strings.Split(utils.StripANSI(m.View().Content), "\n")
+	// 2 wrapped text rows + 2 padding rows: box spans rows 2..5, capped at
+	// 60 wide with its right edge on the transcript's last column (76).
+	const boxCol = 76
+	for _, row := range []int{2, 3, 4, 5} {
+		r := []rune(strings.TrimRight(lines[row], " "))
+		if len(r) <= boxCol || string(r[boxCol]) != "┃" {
+			t.Fatalf("wrapped toast row %d missing right bar at col %d: %q", row, boxCol, lines[row])
+		}
+		if got := string(r[boxCol-59]); got != "┃" {
+			t.Fatalf("wrapped toast row %d left bar at col %d = %q, want ┃ (60-wide box)", row, boxCol-59, got)
+		}
+	}
+	if r := []rune(strings.TrimRight(lines[6], " ")); len(r) > boxCol && string(r[boxCol]) == "┃" {
+		t.Error("row 6 must be below the wrapped toast box")
 	}
 }
 
@@ -4370,9 +4433,10 @@ func TestScrollbarDragGuards(t *testing.T) {
 }
 
 // TestBoxSelection drives the selection state machine: press anchors, held
-// motion extends, release copies the boxed text via OSC 52 and drops the
-// drag flag, the highlight survives scrolling (document coordinates), and
-// the next press starts over.
+// motion extends (the highlight renders and survives scrolling — document
+// coordinates), and release drops the box entirely: the copy rides OSC 52
+// and the toast replaces the highlight as feedback; the next press starts
+// over.
 func TestBoxSelection(t *testing.T) {
 	m := newTestModel()
 	for i := 0; i < 30; i++ {
@@ -4393,16 +4457,8 @@ func TestBoxSelection(t *testing.T) {
 	if !m.selectionSet() {
 		t.Fatalf("motion did not extend the selection")
 	}
-	upd, _ = m.Update(tea.MouseReleaseMsg(tea.Mouse{X: 20, Y: 4, Button: tea.MouseLeft}))
-	m = upd.(*Model)
-	if m.selection.active {
-		t.Fatalf("release did not end the selection drag")
-	}
-	if !m.selectionSet() {
-		t.Fatalf("highlight must persist after release")
-	}
 
-	// The rendered viewport carries the selection background.
+	// Mid-drag: the rendered viewport carries the selection background.
 	rendered := m.viewportView()
 	if !strings.Contains(rendered, "48;2;38;70;109m") {
 		t.Fatalf("selection background not rendered")
@@ -4420,6 +4476,24 @@ func TestBoxSelection(t *testing.T) {
 		t.Fatalf("scroll cleared the selection")
 	}
 
+	// Release copies and drops the box — the toast is the feedback.
+	m.chatViewport.SetYOffset(yOff)
+	m.syncViewport()
+	upd, cmd := m.Update(tea.MouseReleaseMsg(tea.Mouse{X: 20, Y: 4, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if m.selection.active {
+		t.Fatalf("release did not end the selection drag")
+	}
+	if m.selectionSet() {
+		t.Fatalf("highlight must drop on release; the toast replaces it")
+	}
+	if cmd == nil {
+		t.Fatalf("release produced no copy command")
+	}
+	if m.notifyMsg != "Copied to clipboard" {
+		t.Errorf("copy toast = %q", m.notifyMsg)
+	}
+
 	// The next press starts a fresh (empty) selection.
 	upd, _ = m.Update(tea.MouseClickMsg(tea.Mouse{X: 4, Y: 2, Button: tea.MouseLeft}))
 	m = upd.(*Model)
@@ -4427,7 +4501,8 @@ func TestBoxSelection(t *testing.T) {
 		t.Fatalf("press did not reset the previous selection")
 	}
 
-	// Copy: box a known span of a known row and check the extracted text.
+	// Copy text: box a known span of a known row and check the extracted
+	// text (read pre-release — the state is gone once the release lands).
 	m.chatViewport.SetYOffset(yOff)
 	m.syncViewport()
 	line := strings.Split(strings.Split(m.chatViewport.View(), "\n")[3], "\n")[0]
@@ -4439,13 +4514,16 @@ func TestBoxSelection(t *testing.T) {
 	m = upd.(*Model)
 	upd, _ = m.Update(tea.MouseMotionMsg(tea.Mouse{X: 6 + 9, Y: 3, Button: tea.MouseLeft}))
 	m = upd.(*Model)
-	upd, cmd := m.Update(tea.MouseReleaseMsg(tea.Mouse{X: 6 + 9, Y: 3, Button: tea.MouseLeft}))
+	if want := plain[5:15]; m.selectedText() != want {
+		t.Fatalf("selectedText = %q, want %q", m.selectedText(), want)
+	}
+	upd, cmd = m.Update(tea.MouseReleaseMsg(tea.Mouse{X: 6 + 9, Y: 3, Button: tea.MouseLeft}))
 	m = upd.(*Model)
 	if cmd == nil {
 		t.Fatalf("release produced no copy command")
 	}
-	if want := plain[5:15]; m.selectedText() != want {
-		t.Fatalf("selectedText = %q, want %q", m.selectedText(), want)
+	if m.selectionSet() || m.selection.active {
+		t.Fatalf("release must clear the box")
 	}
 }
 
@@ -4465,10 +4543,22 @@ func TestSelectionClearsOnContentChange(t *testing.T) {
 	if !m.selectionSet() {
 		t.Fatalf("selection not set")
 	}
+	// A drag in flight must survive content changes: streaming appends rows
+	// below the selection, so wiping the gesture mid-drag would make
+	// selection unusable while the agent replies.
+	upd, _ = m.markContentDirty()
+	m = upd.(*Model)
+	if !m.selection.active || !m.selectionSet() {
+		t.Fatalf("content change killed an in-flight drag")
+	}
+	// Once released, the highlight is transient: the next content change
+	// drops it.
+	upd, _ = m.Update(tea.MouseReleaseMsg(tea.Mouse{X: 12, Y: 2, Button: tea.MouseLeft}))
+	m = upd.(*Model)
 	upd, _ = m.markContentDirty()
 	m = upd.(*Model)
 	if m.selectionSet() || m.selection.active {
-		t.Fatalf("content change did not clear the selection")
+		t.Fatalf("content change did not clear the released selection")
 	}
 }
 

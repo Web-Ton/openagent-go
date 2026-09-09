@@ -1,7 +1,6 @@
 package chat
 
 import (
-	"fmt"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -27,11 +26,11 @@ type selCell struct {
 
 // selectionFields are the box-selection state embedded in Model.
 type selectionFields struct {
-	// active is true between the anchoring press and its release.
+	// active is true between the anchoring press and its release; the box
+	// exists only inside that window (release drops it — a copy is
+	// confirmed by the toast, a blank box has nothing worth keeping).
 	active bool
-	// anchor is where the press landed; focus trails the cursor. They stay
-	// set after release so the highlight persists until the next press or
-	// content change.
+	// anchor is where the press landed; focus trails the cursor.
 	anchor, focus selCell
 }
 
@@ -79,19 +78,22 @@ func (m *Model) extendSelection(x, y int) {
 	m.selection.focus = m.selCellAt(x, y)
 }
 
-// finishSelection ends the drag and copies the boxed text via OSC 52. A
-// zero-size selection (a plain click) copies nothing but keeps the
-// highlight cleared.
+// finishSelection ends the drag: the box always drops on release. A
+// non-empty box is copied via OSC 52 (tea.SetClipboard) and confirmed by
+// the toast, which doubles as the "what happened" feedback in place of the
+// dropped highlight; a zero-size (plain click) or blank box copies nothing
+// and simply clears.
 func (m *Model) finishSelection() (tea.Model, tea.Cmd) {
-	m.selection.active = false
-	if !m.selectionSet() {
+	has := m.selectionSet()
+	text := ""
+	if has {
+		text = m.selectedText()
+	}
+	m.clearSelection()
+	if !has || text == "" {
 		return m, nil
 	}
-	text := m.selectedText()
-	if text == "" {
-		return m, nil
-	}
-	return m, tea.Batch(tea.SetClipboard(text), m.notify(fmt.Sprintf("Copied %d chars", utils.DisplayWidth(text))))
+	return m, tea.Batch(tea.SetClipboard(text), m.notify("Copied to clipboard"))
 }
 
 // selectedText extracts the boxed cells from the visible window and joins

@@ -139,10 +139,13 @@ type Model struct {
 
 	statusText string
 
-	// notifyMsg is a transient success toast (e.g. "Session created"). It
-	// auto-clears after notifyDuration; statusText remains the persistent
-	// status line.
+	// notifyMsg is a transient toast (e.g. "Session created", "Copied N
+	// chars"), rendered as a floating box in the top-right corner (see
+	// renderToast). It auto-clears after notifyDuration; statusText remains
+	// the persistent status line. toastID epochs each notify so a stale
+	// clear-timer from an earlier toast never clears its replacement.
 	notifyMsg string
+	toastID   int
 
 	// Token usage (usage_update) shown in the right sidebar: usedTokens is
 	// the session's consumed context, contextSize the model's window.
@@ -716,7 +719,11 @@ type promptDoneMsg struct {
 	// trips) from the response _meta; 0 when unknown (aborted, older peer).
 	steps int
 }
-type notifyClearMsg struct{}
+type notifyClearMsg struct {
+	// id is the toastID epoch of the notify that scheduled this clear; the
+	// handler ignores it when a newer notify has since replaced the toast.
+	id int
+}
 type flushViewportMsg struct{}
 type acpErrorMsg struct{ err error }
 type usageUpdateMsg struct{ used, total int }
@@ -1171,7 +1178,11 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.trimMessageStore()
 		return m.markContentDirty()
 	case notifyClearMsg:
-		m.notifyMsg = ""
+		// A newer notify re-epochs toastID, so this stale timer leaves the
+		// replacement toast alone.
+		if msg.id == m.toastID {
+			m.notifyMsg = ""
+		}
 		return m, nil
 
 	case flushViewportMsg:
@@ -1701,13 +1712,17 @@ func (m *Model) runSlashCommand(text string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// notify shows a transient success toast; it auto-clears after
-// notifyDuration. Callers should return the returned cmd from Update.
+// notify shows a transient toast (a floating box in the top-right corner,
+// see renderToast); it auto-clears after notifyDuration. Callers should
+// return the returned cmd from Update. Each call re-epochs toastID so an
+// overlapping earlier timer cannot clear the newer toast.
 func (m *Model) notify(text string) tea.Cmd {
 	m.notifyMsg = text
+	m.toastID++
+	id := m.toastID
 	return func() tea.Msg {
 		time.Sleep(notifyDuration)
-		return notifyClearMsg{}
+		return notifyClearMsg{id: id}
 	}
 }
 
@@ -1741,8 +1756,13 @@ func (m *Model) trimMessageStore() {
 func (m *Model) markContentDirty() (tea.Model, tea.Cmd) {
 	// Transcript content changed: doc rows shifted under any existing box
 	// selection, so the highlight (anchored to doc coordinates) would paint
-	// the wrong text — drop it.
-	m.clearSelection()
+	// the wrong text — drop it. A drag in flight survives: streaming only
+	// appends rows below the selection, so its anchored rows stay put, and
+	// killing the gesture mid-stream makes selection unusable exactly while
+	// the agent is replying.
+	if !m.selection.active {
+		m.clearSelection()
+	}
 	if !m.loading {
 		m.renderPending = false
 		m.viewportDirty = true
