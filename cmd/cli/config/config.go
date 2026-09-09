@@ -237,7 +237,12 @@ func (m *ModelConfig) UnmarshalJSON(b []byte) error {
 }
 
 type ServerConfig struct {
-	Port int `json:"port,omitempty"`
+	// Host is the listen address for the REST server. Default
+	// "127.0.0.1" (loopback only — the server is not reachable from
+	// the network). Set to "0.0.0.0" to listen on all interfaces
+	// (container/remote-access scenarios).
+	Host string `json:"host,omitempty"`
+	Port int    `json:"port,omitempty"`
 }
 
 // McpServerConfig describes an MCP server using the standard MCP config format
@@ -396,6 +401,9 @@ func ApplyDefaults(cfg *Config, settingsPath string) {
 	}
 	if len(cfg.Plugins) == 0 {
 		cfg.Plugins = []string{DefaultPluginsDir()}
+	}
+	if cfg.Server.Host == "" {
+		cfg.Server.Host = "127.0.0.1"
 	}
 	if cfg.Server.Port == 0 {
 		cfg.Server.Port = 8080

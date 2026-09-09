@@ -338,6 +338,10 @@ func buildServeCmd(cfg config.Config) *cobra.Command {
 			if p > 0 {
 				cfg.Server.Port = p
 			}
+			h, _ := cmd.Flags().GetString("host")
+			if h != "" {
+				cfg.Server.Host = h
+			}
 			if sandboxEnabled, _ := cmd.Flags().GetBool("sandbox"); sandboxEnabled {
 				cfg.Sandbox.Enabled = true
 			}
@@ -380,6 +384,7 @@ func buildServeCmd(cfg config.Config) *cobra.Command {
 	cmd.Flags().Bool("acp", false, "ACP mode over stdio")
 	cmd.Flags().String("channel", "", "Enable IM channel (\"feishu\", \"wechat\", or \"wecom\")")
 	cmd.Flags().Int("port", 0, "REST port (overrides settings)")
+	cmd.Flags().String("host", "", "REST listen address (overrides settings, default 127.0.0.1)")
 	cmd.Flags().Bool("sandbox", false, "Enable OS-native sandbox (bwrap/seatbelt) for shell commands")
 	addCapabilityFlags(cmd)
 	return cmd
