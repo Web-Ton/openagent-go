@@ -177,7 +177,7 @@ func RunREST(ctx context.Context, cfg *config.Config) error {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	addr := fmt.Sprintf(":%d", cfg.Server.Port)
+	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	// ReadHeaderTimeout guards the slow-header DoS (a client that never
 	// finishes sending headers holds a connection); body reads are
 	// bounded per-handler (see the cli:http dispatcher). SSE endpoints
