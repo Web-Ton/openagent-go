@@ -65,5 +65,5 @@ func TestConnectMCP_EmptyIdentityDoesNotPanic(t *testing.T) {
 			t.Fatalf("connectMCP panicked with empty identity: %v", r)
 		}
 	}()
-	_, _, _ = srv.connectMCP(context.Background(), nil)
+	_, _ = srv.connectMCP(context.Background(), nil)
 }

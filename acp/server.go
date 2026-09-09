@@ -232,9 +232,10 @@ type agentSession struct {
 	// MCP server configs from session creation.
 	mcpServers []openacp.McpServer
 
-	// Connected MCP sessions. Populated on session create/load/resume;
-	// closed on session close/delete.
-	mcpSessions []*mcp.Session
+	// Connected MCP servers, one conn per configured server (live session
+	// + connect outcome). Populated on session create/load/resume; closed
+	// on session close/delete.
+	mcpConns mcpConns
 
 	// MCP tools imported from all connected servers. Populated once at
 	// connect time; injected into the session runtime.
@@ -972,36 +973,53 @@ func (s *AgentServer) loadTotalTokens(ctx context.Context, sessionID string) int
 	return 0
 }
 
-// connectMCP connects to all configured MCP servers and returns the sessions.
-// Tools are listed once at connect time and cached — the connection is
-// long-lived (one connection per session lifetime).
-// Failed connections are logged but not fatal — MCP is an optional enhancement.
-// connectMCP connects to all configured MCP servers and returns the
-// sessions plus a per-server status snapshot for the frontend (sent as the
-// "mcp_servers_update" session update). Tools are listed once at connect
-// time and cached — the connection is long-lived (one connection per
-// session lifetime).
-// Failed connections are logged but not fatal — MCP is an optional enhancement.
-func (s *AgentServer) connectMCP(ctx context.Context, servers []openacp.McpServer) ([]*mcp.Session, []openagent.Tool, []openacp.McpServerStatus) {
+// mcpConn is one configured MCP server's connect outcome: the live session
+// when the connect succeeded (nil otherwise) paired with the wire status
+// snapshot pushed to the client as "mcp_servers_update". Pairing them in
+// one value replaces the former parallel sessions/statuses slices, whose
+// index alignment held only by convention (statuses also carried failures).
+type mcpConn struct {
+	sess   *mcp.Session            // nil when the connect failed
+	status openacp.McpServerStatus // name/type/outcome (+ tool count when listed)
+}
+
+// mcpConns is a session's set of per-server connect outcomes, in config
+// order (failures included).
+type mcpConns []*mcpConn
+
+// statuses flattens the per-connection snapshots for the wire.
+func (conns mcpConns) statuses() []openacp.McpServerStatus {
+	out := make([]openacp.McpServerStatus, 0, len(conns))
+	for _, c := range conns {
+		out = append(out, c.status)
+	}
+	return out
+}
+
+// connectMCP connects to all configured MCP servers and returns one conn
+// per server (successful or failed) plus the merged tool list. Tools are
+// listed once at connect time and cached — the connection is long-lived
+// (one connection per session lifetime). Failed connections are logged but
+// not fatal — MCP is an optional enhancement.
+func (s *AgentServer) connectMCP(ctx context.Context, servers []openacp.McpServer) (mcpConns, []openagent.Tool) {
 	if !s.MCPEnabled {
-		return nil, nil, nil
+		return nil, nil
 	}
 	servers = s.mergeMcpServers(servers)
 	client := mcp.NewClient(s.AgentName, s.AgentVersion)
-	var sessions []*mcp.Session
+	var conns mcpConns
 	var tools []openagent.Tool
-	var statuses []openacp.McpServerStatus
 	seen := make(map[string]string) // tool name → server (duplicate detection)
 	for _, cfg := range servers {
-		st := openacp.McpServerStatus{Name: cfg.Name, Type: cfg.Type, Status: "failed"}
+		conn := &mcpConn{status: openacp.McpServerStatus{Name: cfg.Name, Type: cfg.Type, Status: "failed"}}
+		conns = append(conns, conn)
 		sess, err := s.connectOneMCP(ctx, client, cfg)
 		if err != nil {
 			mcpWarn("connect", cfg.Name, err)
-			statuses = append(statuses, st)
 			continue
 		}
-		sessions = append(sessions, sess)
-		statuses = append(statuses, openacp.McpServerStatus{Name: cfg.Name, Type: cfg.Type, Status: "connected"})
+		conn.sess = sess
+		conn.status.Status = "connected"
 		// Name the session so tools are "mcp__<server>__<tool>" — unique
 		// across servers and self-describing to the model.
 		st2, err := sess.Named(cfg.Name).Tools(ctx)
@@ -1009,7 +1027,7 @@ func (s *AgentServer) connectMCP(ctx context.Context, servers []openacp.McpServe
 			mcpWarn("list tools", cfg.Name, err)
 			continue
 		}
-		statuses[len(statuses)-1].Tools = len(st2)
+		conn.status.Tools = len(st2)
 		for _, t := range st2 {
 			name := t.Definition().Name
 			if owner, dup := seen[name]; dup {
@@ -1022,19 +1040,19 @@ func (s *AgentServer) connectMCP(ctx context.Context, servers []openacp.McpServe
 			tools = append(tools, t)
 		}
 	}
-	return sessions, tools, statuses
+	return conns, tools
 }
 
 // sendMcpServersUpdate pushes the connect-time MCP snapshot to the client
 // (sidebar rendering). Sent on session create, load and resume; a nil
 // sender (stdout-free transports) skips silently.
-func (s *AgentServer) sendMcpServersUpdate(sid openacp.SessionId, statuses []openacp.McpServerStatus) {
+func (s *AgentServer) sendMcpServersUpdate(sid openacp.SessionId, conns mcpConns) {
 	if s.updateSender == nil {
 		return
 	}
 	s.updateSender.SendSessionUpdate(sid, openacp.SessionUpdate{
 		SessionUpdate: "mcp_servers_update",
-		McpServers:    statuses,
+		McpServers:    conns.statuses(),
 	})
 }
 
@@ -1091,10 +1109,13 @@ func (s *AgentServer) SetSettingsMcpServers(servers []openacp.McpServer) {
 	s.mcpMu.Unlock()
 }
 
-// disconnectMCP closes all MCP connections.
-func (s *AgentServer) disconnectMCP(sessions []*mcp.Session) {
-	for _, sess := range sessions {
-		_ = sess.Close()
+// disconnectMCP closes all live MCP connections; failed conns have no
+// session to close.
+func (s *AgentServer) disconnectMCP(conns mcpConns) {
+	for _, c := range conns {
+		if c.sess != nil {
+			_ = c.sess.Close()
+		}
 	}
 }
 
@@ -1199,7 +1220,7 @@ func (s *AgentServer) resolveSessionCwd(ctx context.Context, sessionID, reqCwd s
 
 func (s *AgentServer) OnNewSession(ctx context.Context, req openacp.NewSessionRequest) (*openacp.NewSessionResponse, error) {
 	id := s.newSessionID()
-	mcpSessions, mcpTools, mcpStatuses := s.connectMCP(ctx, req.McpServers)
+	mcpConns, mcpTools := s.connectMCP(ctx, req.McpServers)
 	cwd := utils.NormalizePath(req.Cwd)
 	ss := &agentSession{
 		id:                    id,
@@ -1210,7 +1231,7 @@ func (s *AgentServer) OnNewSession(ctx context.Context, req openacp.NewSessionRe
 		firstPrompt:           true,
 		additionalDirectories: req.AdditionalDirectories,
 		mcpServers:            req.McpServers,
-		mcpSessions:           mcpSessions,
+		mcpConns:              mcpConns,
 		mcpTools:              mcpTools,
 	}
 
@@ -1237,7 +1258,7 @@ func (s *AgentServer) OnNewSession(ctx context.Context, req openacp.NewSessionRe
 			AvailableSkills: s.availableSkills(ss),
 		})
 	}
-	s.sendMcpServersUpdate(id, mcpStatuses)
+	s.sendMcpServersUpdate(id, mcpConns)
 
 	return &openacp.NewSessionResponse{
 		Meta:          map[string]any{"created_at": time.Now().UTC().Format(time.RFC3339Nano)},
@@ -1270,9 +1291,8 @@ func (s *AgentServer) OnLoadSession(ctx context.Context, req openacp.LoadSession
 			mcpServers:            req.McpServers,
 		}
 		// Reconnect MCP servers and inject tools for this session.
-		var mcpStatuses []openacp.McpServerStatus
-		ss.mcpSessions, ss.mcpTools, mcpStatuses = s.connectMCP(ctx, req.McpServers)
-		s.sendMcpServersUpdate(req.SessionID, mcpStatuses)
+		ss.mcpConns, ss.mcpTools = s.connectMCP(ctx, req.McpServers)
+		s.sendMcpServersUpdate(req.SessionID, ss.mcpConns)
 
 		// Create per-session process manager for long-running shell commands.
 		if cwd != "" {
@@ -1448,9 +1468,8 @@ func (s *AgentServer) OnResumeSession(ctx context.Context, req openacp.ResumeSes
 			mcpServers:            req.McpServers,
 		}
 		// Reconnect MCP servers and inject tools for this session.
-		var mcpStatuses []openacp.McpServerStatus
-		ss.mcpSessions, ss.mcpTools, mcpStatuses = s.connectMCP(ctx, req.McpServers)
-		s.sendMcpServersUpdate(req.SessionID, mcpStatuses)
+		ss.mcpConns, ss.mcpTools = s.connectMCP(ctx, req.McpServers)
+		s.sendMcpServersUpdate(req.SessionID, ss.mcpConns)
 
 		// Create per-session process manager for shell tool background processes.
 		if cwd != "" {
@@ -1479,7 +1498,7 @@ func (s *AgentServer) OnResumeSession(ctx context.Context, req openacp.ResumeSes
 func (s *AgentServer) OnCloseSession(ctx context.Context, req openacp.CloseSessionRequest) (*openacp.CloseSessionResponse, error) {
 	ss := s.getSession(req.SessionID)
 	if ss != nil {
-		s.disconnectMCP(ss.mcpSessions)
+		s.disconnectMCP(ss.mcpConns)
 		s.killSubAgents(ss)
 	}
 	s.removeSession(req.SessionID)
@@ -1489,7 +1508,7 @@ func (s *AgentServer) OnCloseSession(ctx context.Context, req openacp.CloseSessi
 func (s *AgentServer) OnDeleteSession(ctx context.Context, req openacp.DeleteSessionRequest) (*openacp.DeleteSessionResponse, error) {
 	ss := s.getSession(req.SessionID)
 	if ss != nil {
-		s.disconnectMCP(ss.mcpSessions)
+		s.disconnectMCP(ss.mcpConns)
 		s.killSubAgents(ss)
 		if ss.processMgr != nil {
 			ss.processMgr.Cleanup()
