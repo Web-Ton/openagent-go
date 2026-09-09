@@ -22,6 +22,20 @@ type CompressedContext struct {
 // include all consecutive tool results so the summary captures the complete
 // tool exchange. all is in chronological order.
 //
+// It also guarantees an invariant: after compaction the retained working set
+// (all[overflow:]) EITHER starts with a user message OR is empty. This is
+// enforced by scanning forward from overflow to the next user message:
+//   - found → overflow lands on that user (it stays in the working set)
+//   - not found → overflow is pushed to len(all) (everything compressed,
+//     working set is empty; the caller injects a <system-reminder> user
+//     placeholder via ensureValidWorkingSet)
+//
+// Without this, an 80% compaction on a session with one user + a long
+// assistant→tool chain compresses the only user into the summary, leaving a
+// working set of pure assistant/tool messages that providers reject ("must
+// contain at least one 'user' or 'tool' role") and that TrimOrphanToolCalls
+// may delete to empty anyway.
+//
 // Returns the adjusted overflow index (may be larger than input).
 func SafeCompressionBoundary(all []Message, overflow int) int {
 	if overflow <= 0 || overflow >= len(all) {
@@ -44,5 +58,12 @@ func SafeCompressionBoundary(all []Message, overflow int) int {
 		}
 	}
 
-	return overflow
+	// Invariant: working set starts with a user message or is empty.
+	// Scan forward for the next user; if none exists, compress everything.
+	for i := overflow; i < len(all); i++ {
+		if all[i].Role == RoleUser {
+			return i // user found — keep it as the first working message
+		}
+	}
+	return len(all) // no user after overflow — compress all, working set is empty
 }

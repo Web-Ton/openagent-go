@@ -141,28 +141,45 @@ func (rt *Runtime) prepareMemory(ctx context.Context, session openagent.Session,
 	// The token scan walks only the post-summary increment (already
 	// compressed messages are not fetched at all).
 	//
-	// CompactRatio: instead of keeping the working set flush against the
-	// budget (compress just the overflow), compress a FRACTION of the budget
-	// so the retained working set sits well below the budget. Default 0.8:
-	// compress 80%, retain 20%. This leaves headroom for several turns of
-	// tool results and model replies before compaction re-triggers — the
-	// "compress just the overflow" strategy leaves the working set at ~100%
-	// of budget, so any new message trips compaction again next turn (a
-	// positive-feedback loop: each pass grows the summary, which shrinks
-	// the budget, which re-triggers compaction that grows the summary…).
+	// Two-step logic:
+	//   1. Trigger check: compute the TOTAL token count of the working set.
+	//      Only when it exceeds the budget (real overflow) does compaction
+	//      fire — not at 20%, not at 50%, at 100%.
+	//   2. Retain target: once triggered, compress CompactRatio (default 80%)
+	//      of the budget and keep the most recent retainFraction (20%) as
+	//      headroom. The scan walks from the tail, and overflow lands where
+	//      cumulative tokens first exceed retainTarget.
+	//
+	// The previous code used retainTarget as the TRIGGER threshold (break at
+	// 20% → compaction fired at 20% of budget, far before real overflow).
+	// That caused premature compaction on small conversations, unnecessary
+	// summary growth, and a faster positive-feedback loop — the opposite of
+	// what CompactRatio was meant to fix.
 	retainFraction := 1.0 - rt.cfg.CompactRatio
 	if retainFraction <= 0 || retainFraction >= 1 {
 		retainFraction = 0.2 // default 0.8 ratio → retain 20%
 	}
 	retainTarget := int(float64(budget) * retainFraction)
-	overflow := len(msgs)
+
+	// Single tail-to-head scan serves both purposes:
+	//   1. Trigger: after the full scan, `tokens` is the total working-set
+	//      size — compaction fires only when total > budget (real overflow).
+	//   2. Retain: if total > budget, the scan already recorded where
+	//      cumulative tokens first exceeded retainTarget — that's the
+	//      overflow point (compress everything before it, keep the tail).
+	// Each message's tokens are counted exactly once.
+	// modelID already declared above (L110); reused here.
+	overflow := len(msgs) // default: no compaction (budget fits)
 	tokens := 0
 	for i := len(msgs) - 1; i >= 0; i-- {
-		tokens += openagent.CountMessageTokens(openagent.TokenizerModelID(rt.runModel), msgs[i])
-		if tokens > retainTarget {
-			overflow = i + 1
-			break
+		tokens += openagent.CountMessageTokens(modelID, msgs[i])
+		if tokens > retainTarget && overflow == len(msgs) {
+			overflow = i + 1 // first (from tail) index past retainTarget
 		}
+	}
+	// Trigger check: only compact on real overflow, not at retainTarget.
+	if tokens <= budget {
+		overflow = len(msgs) // total fits budget — no compaction
 	}
 	if overflow < len(msgs) {
 		overflow = openagent.SafeCompressionBoundary(msgs, overflow)
