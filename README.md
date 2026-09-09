@@ -290,7 +290,7 @@ To keep a specific domain on local storage while using OpenViking for the rest:
 - **Sandbox** — native OS-level confinement (Linux bwrap, macOS Seatbelt) for shell, file, and network operations
 - **WASM plugins** — agent-level: `agent:tools` and `agent:observers` plug into the tool/observer pipeline. CLI-level: `cli:settings`, `cli:commands`, `cli:observers`, `cli:http` for settings injection, command extension, lifecycle monitoring, and custom HTTP routes. Any plugin can declare cron-scheduled jobs.
 - **Static context profiles** — `AGENTS.md` (working rules) and `SOUL.md` (persona & limits) with user-level and project-level resolution
-- **Slash commands** — built-in `/help`, `/mode`, `/model`, `/compact`, `/context`, `/cwd`, `/clear`, `/rename`, `/sessions`, extensible via `slash/` registry
+- **Slash commands** — built-in `/help`, `/mode`, `/model`, `/compact`, `/cwd`, `/clear`, `/rename`, `/sessions`, extensible via `slash/` registry
 - **Full CLI** — `openagent` with cobra commands, config-driven models, keyring secrets, WASM plugin runtime
 - **IM channels** — Feishu/Lark (WebSocket, card-based streaming output with markdown and tool call cards, one-click QR setup, inline approval buttons, /clear and /mode commands), personal WeChat (Tencent ilinkai channel, QR login with pairing code, /clear command), and WeCom (official long connection, native streaming replies, QR robot auto-creation, /clear command)
 - **RunHooks with state** — start/end callbacks share opaque state; OTEL spans nest, slog logs duration

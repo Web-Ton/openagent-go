@@ -2873,22 +2873,6 @@ func (s *AgentServer) buildSlashContext(ctx context.Context, sid openacp.Session
 				SummaryTokens: st.SummaryTokens,
 			}, nil
 		},
-		ContextStats: func() (*slash.ContextStats, error) {
-			rt := ss.getRuntime()
-			if rt == nil {
-				rt = s.buildRuntimeForSession(sid, ss)
-				ss.setRuntime(rt)
-			}
-			summary, working, window, err := rt.ContextUsage(ctx, string(sid))
-			if err != nil {
-				return nil, err
-			}
-			return &slash.ContextStats{
-				SummaryTokens: summary,
-				WorkingTokens: working,
-				Window:        window,
-			}, nil
-		},
 		SettingsList: func() (string, error) {
 			s.settingsCBMu.RLock()
 			cb := s.settingsCB

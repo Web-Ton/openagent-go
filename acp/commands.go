@@ -1,7 +1,6 @@
 package acp
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/yusheng-g/openagent-go/slash"
@@ -73,23 +72,6 @@ func (s *AgentServer) buildCommandRegistry() *slash.Registry {
 				return "Nothing to compact — session is empty or no summarizer configured.\n", nil
 			}
 			return "Manual context compaction complete.\n", nil
-		})
-
-	r.Register("context", "Show context window usage", nil,
-		func(ctx slash.Context, _ string) (string, error) {
-			if ctx.ContextStats == nil {
-				return "Context window: " + fmt.Sprintf("%d", ctx.TotalTokens) + " total tokens used.\n", nil
-			}
-			st, err := ctx.ContextStats()
-			if err != nil {
-				return "", err
-			}
-			var b strings.Builder
-			b.WriteString(fmt.Sprintf("Summary: %d tokens\n", st.SummaryTokens))
-			b.WriteString(fmt.Sprintf("Working: %d tokens\n", st.WorkingTokens))
-			b.WriteString(fmt.Sprintf("Used:    %d tokens\n", st.SummaryTokens+st.WorkingTokens))
-			b.WriteString(fmt.Sprintf("Window:  %d tokens\n", st.Window))
-			return b.String(), nil
 		})
 
 	r.Register("cwd", "Show current working directory", nil,
