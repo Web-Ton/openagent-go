@@ -192,10 +192,12 @@ func New(cfg *agent.Agent, deps Deps) *Runtime {
 		rt.tools = append(rt.tools, rt.newSubAgentTool(sa, deps.SubAgentRegistry))
 	}
 	// sub_agent_send lets the model follow up on a spawned sub-agent with
-	// history. Registered only when delegation tools exist, and alongside
-	// them so plan-mode caching (subAgentToolNames) keeps them in lockstep.
+	// history. sub_agent_list shows which sub-agents are live/running. Both
+	// registered only when delegation tools exist, and alongside them so
+	// plan-mode caching (subAgentToolNames) keeps them in lockstep.
 	if len(cfg.SubAgents) > 0 {
 		rt.tools = append(rt.tools, newSendTool(deps.SubAgentRegistry))
+		rt.tools = append(rt.tools, newListTool(deps.SubAgentRegistry))
 	}
 	if deps.Context != nil {
 		rt.context = deps.Context

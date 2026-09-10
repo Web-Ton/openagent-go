@@ -75,6 +75,11 @@ func (t *sendTool) Execute(ctx context.Context, args json.RawMessage) *openagent
 			params.AgentID), false, "")
 	}
 	child.running = true
+	if params.Description != "" {
+		child.lastTask = params.Description
+	} else {
+		child.lastTask = params.Message
+	}
 	child.mu.Unlock()
 	defer func() {
 		child.mu.Lock()

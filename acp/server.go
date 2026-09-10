@@ -2518,17 +2518,18 @@ func toolNames(tools []openagent.Tool) []string {
 }
 
 // subAgentToolNames returns the delegation tool names for a config's
-// sub-agents (registered as tools by kernel.New), plus "sub_agent_send" when
-// delegation tools exist — the follow-up tool is registered alongside them
-// (kernel.New) and must be cached/dropped/re-injected in lockstep with them
-// across plan-mode transitions (applyModeTools).
+// sub-agents (registered as tools by kernel.New), plus "sub_agent_send" and
+// "sub_agent_list" when delegation tools exist — the follow-up/status tools
+// are registered alongside them (kernel.New) and must be cached/dropped/
+// re-injected in lockstep with them across plan-mode transitions
+// (applyModeTools).
 func subAgentToolNames(cfg *agent.Agent) []string {
 	var names []string
 	for _, sa := range cfg.SubAgents {
 		names = append(names, sa.Name)
 	}
 	if len(cfg.SubAgents) > 0 {
-		names = append(names, "sub_agent_send")
+		names = append(names, "sub_agent_send", "sub_agent_list")
 	}
 	return names
 }

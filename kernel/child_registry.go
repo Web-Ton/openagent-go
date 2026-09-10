@@ -78,6 +78,7 @@ type liveChild struct {
 	mu         sync.Mutex
 	running    bool               // true while executing; concurrent calls error
 	cancel     context.CancelFunc // cancels the async run; nil for sync spawns
+	lastTask   string             // last task/description sent (for List)
 }
 
 // startAsync runs a child in a background goroutine and returns immediately.
@@ -100,22 +101,34 @@ func (r *childRegistry) startAsync(child *liveChild, session openagent.Session, 
 	}
 	r.mu.Lock()
 	if r.activeAsync >= maxConcurrentSubAgents {
-		// List the running agent_ids so the model knows who to wait for.
-		running := make([]string, 0, r.activeAsync)
+		// Snapshot the live map under r.mu, then release before locking
+		// individual children — another startAsync could be holding
+		// child2.mu and waiting for r.mu (deadlock if we hold r.mu and
+		// wait for child2.mu).
+		snapshot := make(map[string]*liveChild, len(r.live))
 		for id, c := range r.live {
+			snapshot[id] = c
+		}
+		r.mu.Unlock()
+		child.mu.Unlock()
+		running := make([]string, 0, len(snapshot))
+		for id, c := range snapshot {
 			c.mu.Lock()
 			if c.running {
 				running = append(running, id)
 			}
 			c.mu.Unlock()
 		}
-		r.mu.Unlock()
-		child.mu.Unlock()
 		return fmt.Errorf("too many sub-agents running (%d/%d max) — wait for some to finish before launching more. Currently running: %s",
 			r.activeAsync, maxConcurrentSubAgents, strings.Join(running, ", "))
 	}
 	r.activeAsync++
 	child.running = true
+	if description != "" {
+		child.lastTask = description
+	} else {
+		child.lastTask = task
+	}
 	// Create the cancel function BEFORE releasing child.mu so KillAll
 	// (which reads child.cancel under child.mu) never sees nil — the
 	// goroutine launch window can't be raced by KillAll anymore.
@@ -250,6 +263,44 @@ func (r *childRegistry) get(id string) (*liveChild, bool) {
 	defer r.mu.Unlock()
 	c, ok := r.live[id]
 	return c, ok
+}
+
+// SubAgentInfo is the public view of a live sub-agent, returned by List.
+type SubAgentInfo struct {
+	ID      string `json:"agent_id"` // e.g. "explorer-1"
+	Name    string `json:"name"`     // agent name (e.g. "explorer")
+	Running bool   `json:"running"`  // true while executing a task
+	Task    string `json:"task"`     // the last task/description sent
+}
+
+// List returns info about all live sub-agents in this session. Running=true
+// means the sub-agent is currently executing; false means it finished and is
+// resumable via sub_agent_send. Sub-agents that were killed (KillAll on
+// session close) are not listed — their absence signals they're gone.
+//
+// Snapshots the live map under r.mu, then releases before locking individual
+// children — same pattern as KillAll and startAsync's cap-check path, to
+// avoid AB-BA deadlock with startAsync (which takes child.mu then r.mu).
+func (r *childRegistry) List() []SubAgentInfo {
+	r.mu.Lock()
+	snapshot := make(map[string]*liveChild, len(r.live))
+	for id, c := range r.live {
+		snapshot[id] = c
+	}
+	r.mu.Unlock()
+
+	out := make([]SubAgentInfo, 0, len(snapshot))
+	for _, c := range snapshot {
+		c.mu.Lock()
+		out = append(out, SubAgentInfo{
+			ID:      c.id,
+			Name:    c.cfg.Name,
+			Running: c.running,
+			Task:    c.lastTask,
+		})
+		c.mu.Unlock()
+	}
+	return out
 }
 
 // ── in-memory SessionStore + Compressor ──

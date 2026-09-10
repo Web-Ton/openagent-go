@@ -63,7 +63,7 @@ func platformShellArg() string {
 
 func (t *Shell) Definition() openagent.FunctionDefinition {
 	program := platformShell()
-	desc := fmt.Sprintf("Execute a command via %s. If the command finishes quickly, stdout/stderr/exit code are returned directly. If it runs longer, you'll get file paths to monitor progress — use `read` to check stdout.log, stderr.log, and exit.code.", program)
+	desc := fmt.Sprintf("Execute a command via %s. For reading, writing, or editing files, prefer the dedicated `read`, `write`, and `edit` tools. If the command finishes quickly, stdout/stderr/exit code are returned directly. If it runs longer, you'll get file paths to monitor progress — use `read` to check stdout.log, stderr.log, and exit.code.", program)
 	if t.sandbox == nil {
 		desc += " [UNAVAILABLE: no sandbox configured]"
 	} else if cwd := t.sandbox.CWD(); cwd != "" {

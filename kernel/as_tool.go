@@ -211,6 +211,28 @@ func (t *subAgentTool) Execute(ctx context.Context, args json.RawMessage) *opena
 	}
 
 	// Sync path: run to completion, return the result.
+	// Set running + lastTask under child.mu (same pattern as sendTool's
+	// sync path) so a concurrent List() reports correct status and a
+	// concurrent sub_agent_send is rejected while this run is in flight.
+	child.mu.Lock()
+	if child.running {
+		child.mu.Unlock()
+		return openagent.ErrorResult(fmt.Errorf(
+			"agent tool %q: sub-agent %s is still processing; wait for it to finish",
+			t.cfg.Name, child.id), false, "")
+	}
+	child.running = true
+	if params.Description != "" {
+		child.lastTask = params.Description
+	} else {
+		child.lastTask = params.Task
+	}
+	child.mu.Unlock()
+	defer func() {
+		child.mu.Lock()
+		child.running = false
+		child.mu.Unlock()
+	}()
 	output, err := runChild(ctx, child.cfg, child.resolveDeps(), sessionFromContext(ctx), params.Task, nil, child.sessionID)
 	if err != nil {
 		return &openagent.ToolResult{
@@ -265,6 +287,29 @@ func (t *subAgentTool) ExecuteStream(ctx context.Context, args json.RawMessage) 
 			return
 		}
 		// Sync path: stream the child's progress.
+		// Set running + lastTask under child.mu (same pattern as Execute's
+		// sync path) so List() reports correct status and concurrent
+		// sub_agent_send is rejected while this run is in flight.
+		spawned.mu.Lock()
+		if spawned.running {
+			spawned.mu.Unlock()
+			ch <- openagent.ToolStreamChunk{Error: fmt.Errorf(
+				"agent tool %q: sub-agent %s is still processing; wait for it to finish",
+				t.cfg.Name, spawned.id)}
+			return
+		}
+		spawned.running = true
+		if params.Description != "" {
+			spawned.lastTask = params.Description
+		} else {
+			spawned.lastTask = params.Task
+		}
+		spawned.mu.Unlock()
+		defer func() {
+			spawned.mu.Lock()
+			spawned.running = false
+			spawned.mu.Unlock()
+		}()
 		output, err := runChild(ctx, spawned.cfg, spawned.resolveDeps(), sessionFromContext(ctx), params.Task, func(ev openagent.StreamEvent) {
 			text := ev.Text
 			if ev.Type == openagent.StreamToolResult {
