@@ -24,6 +24,7 @@ import (
 	"github.com/yusheng-g/openagent-go/cmd/cli/tui/layout"
 	"github.com/yusheng-g/openagent-go/cmd/cli/tui/theme"
 	"github.com/yusheng-g/openagent-go/cmd/cli/tui/utils"
+	"github.com/yusheng-g/openagent-go/version"
 )
 
 // This package implements the TUI chat page: welcome screen, input, ACP
@@ -45,6 +46,19 @@ const (
 	PlaceholderPrefix = "Ask anything ... e.g. "
 	PlaceholderSuffix = " (Tab to accept)"
 )
+
+// permInputTipsWidth is the display width of the key-hint tail rendered
+// beside the permission dialog's custom-input line (" enter send  esc back
+// " — RenderCommandTipOn emits a leading space per pair).
+const permInputTipsWidth = 24
+
+// quitArmWindow is how long a ctrl+c quit intent stays armed: quitting
+// needs two ctrl+c within this window (a single press must never kill a
+// session that is only momentarily idle).
+const quitArmWindow = 3 * time.Second
+
+// quitHint is the toast shown while a quit intent is armed.
+const quitHint = "Press ctrl+c again to quit"
 
 // Model is the chat page model. It is deliberately render-only: no ACP client,
 // no event loop, no input history. NewModel takes plain parameters so the TUI
@@ -73,8 +87,9 @@ type Model struct {
 	// view switches immediately without waiting for the ACP session ID.
 	inChat bool
 
-	// mode is the current session mode ("auto" | "manual" | "plan"). Shown as
-	// a badge in the input header; manual is the server default.
+	// mode is the current session mode ("auto" | "semi-auto" | "manual" |
+	// "plan"). Shown as a badge in the input header; manual is the server
+	// default.
 	mode string
 
 	// logoColor / logoGradient drive the welcome-page logo coloring from
@@ -86,6 +101,12 @@ type Model struct {
 
 	spinner components.Loading
 	loading bool
+
+	// turnEpoch guards turn-end bookkeeping against abandoned turns: /new
+	// and session load increment it, and a stale promptDone/acpErrorMsg
+	// from the abandoned turn (its cancel wind-down can land seconds
+	// later) no longer resets loading or drains the NEW turn's queue.
+	turnEpoch int
 
 	statusBar components.StatusBar
 
@@ -100,6 +121,15 @@ type Model struct {
 	permissionReq         *openacp.RequestPermissionRequest
 	permissionReplyCh     chan openacp.RequestPermissionResponse
 	permissionSelectedIdx int
+
+	// permInputMode is the free-text entry behind the dialog's "Custom..."
+	// chip: the chips strip swaps for a one-line input and typing goes to
+	// permTextarea. Submitting rides the reject path the server already
+	// supports — the text travels as the outcome's feedback and the kernel
+	// turns the deny reason into the tool result the model reads, so the
+	// agent adapts to what the user asked to do instead.
+	permInputMode bool
+	permTextarea  textarea.Model
 
 	chatViewport viewport.Model
 	chatTextarea textarea.Model
@@ -116,20 +146,53 @@ type Model struct {
 
 	statusText string
 
-	// notifyMsg is a transient success toast (e.g. "Session created"). It
-	// auto-clears after notifyDuration; statusText remains the persistent
-	// status line.
+	// notifyMsg is a transient toast (e.g. "Session created", "Copied N
+	// chars"), rendered as a floating box in the top-right corner (see
+	// renderToast). It auto-clears after notifyDuration; statusText remains
+	// the persistent status line. toastID epochs each notify so a stale
+	// clear-timer from an earlier toast never clears its replacement.
 	notifyMsg string
+	toastID   int
 
-	// Token usage (usage_update) and prompt count, shown in the right
-	// sidebar: usedTokens is the session's consumed context, contextSize
-	// the model's window, promptCount the prompts sent in the current
-	// session (live sends plus replayed history).
+	// Token usage (usage_update) shown in the right sidebar: usedTokens is
+	// the session's consumed context, contextSize the model's window.
 	usedTokens  int
 	contextSize int
 	promptCount int
 
+	// mcpServers is the session's MCP server list with connect outcomes
+	// (mcp_servers_update, full snapshot), rendered in the sidebar.
+	mcpServers []openacp.McpServerStatus
+
+	// mcpConfigured seeds the welcome MCP indicator from settings before
+	// any session exists; the first wire snapshot replaces the picture.
+	// Sidebar rendering ignores it (chat implies a live session).
+	mcpConfigured []openacp.McpServerStatus
+
 	needAutoScroll bool
+
+	// Scrollbar drag state: sbarDrag is true from a left press on the bar
+	// column until the matching release (see mouse.go); sbarGrab is the
+	// cursor's row offset inside the thumb at grab time, held constant so
+	// the thumb tracks the cursor 1:1 instead of jumping under it.
+	sbarDrag bool
+	sbarGrab int
+
+	// selection is the transcript's in-app box selection (see selection.go).
+	selection selectionFields
+
+	// quitArmedAt marks a ctrl+c quit intent; zero means disarmed. A second
+	// ctrl+c within quitArmWindow quits (armQuit).
+	quitArmedAt time.Time
+
+	// replayBuf holds the history messages a session load streams in while
+	// replayBuffering is true. They are applied in one pass on
+	// sessionLoadedMsg so the transcript renders once, fully formed,
+	// instead of growing message by message. replaying stays true through
+	// the apply pass (the handlers' replay semantics — undated thought
+	// cards, timestamp stamping — key off it); only buffering flips off.
+	replayBuf       []tea.Msg
+	replayBuffering bool
 
 	// compacting is true while a /compact control round-trip is in flight.
 	// The agent's slash registry intercepts the text and compacts the
@@ -262,6 +325,7 @@ const (
 	panelModePlugins
 	panelModeConfig
 	panelModeExport
+	panelModeStatus
 )
 
 // maxHistory caps the input history ring.
@@ -335,6 +399,7 @@ const (
 	actionPlugins
 	actionSplit
 	actionCompact
+	actionStatus
 )
 
 // panelCommand is a slash-command entry for the command panel.
@@ -374,6 +439,7 @@ func allPanelCommands() []panelCommand {
 		{"/export", "Export transcript to Markdown", actionExport, true, false, true},
 		{"/edit", "Edit a past user message", actionEdit, true, false, true},
 		{"/theme", "Cycle color theme", actionTheme, true, true, true},
+		{"/status", "MCP server status", actionStatus, true, false, true},
 		{"/split", "Toggle split view", actionSplit, true, false, true},
 		{"/exit", "Exit the app", actionExit, true, false, true},
 	}
@@ -483,8 +549,8 @@ func isSkillTool(name string) bool {
 
 // NewModel builds a chat model. ver is shown in the footer/sidebar; name is
 // the agent name (used for ACP client identity); mode is the initial session
-// mode ("auto"|"manual"|"plan"); logoColor/logoGradient drive the welcome
-// logo coloring.
+// mode ("auto"|"semi-auto"|"manual"|"plan"); logoColor/logoGradient drive the
+// welcome logo coloring.
 func NewModel(ctx context.Context, cancel context.CancelFunc, workDir, ver, mode, logoColor string, logoGradient []string) *Model {
 	if mode == "" {
 		mode = "manual"
@@ -557,6 +623,7 @@ func NewModel(ctx context.Context, cancel context.CancelFunc, workDir, ver, mode
 		focus: FocusChat,
 
 		chatTextarea: ta,
+		permTextarea: newPermTextarea(defaultWidth),
 		spinner:      components.NewLoading([]string{"|", "/", "-", "\\"}),
 		loading:      false,
 
@@ -631,6 +698,14 @@ type contextCompactingMsg struct{ totalMessages int }
 // renamed the session's title (generated after the first exchange).
 type sessionInfoMsg struct{ title string }
 
+// mcpServersMsg — sessionUpdate "mcp_servers_update": the session's MCP
+// servers with their connect outcome (sidebar section). Full snapshot.
+type mcpServersMsg struct{ servers []openacp.McpServerStatus }
+
+// quitArmTickMsg fires quitArmWindow after a ctrl+c armed the quit intent:
+// past the window the arm lapses and the hint clears.
+type quitArmTickMsg struct{}
+
 // retryingMsg — sessionUpdate "model_retrying": the model call hit a
 // transient error and the kernel backs off before the next attempt.
 // Turn-scoped transient state: never stored, never replayed.
@@ -658,10 +733,20 @@ type promptDoneMsg struct {
 	// steps is the finished prompt's kernel turn count (model↔tool round
 	// trips) from the response _meta; 0 when unknown (aborted, older peer).
 	steps int
+	// epoch is the turn generation this prompt was fired under; handlers
+	// ignore mismatches (an abandoned turn's late landing).
+	epoch int
 }
-type notifyClearMsg struct{}
+type notifyClearMsg struct {
+	// id is the toastID epoch of the notify that scheduled this clear; the
+	// handler ignores it when a newer notify has since replaced the toast.
+	id int
+}
 type flushViewportMsg struct{}
-type acpErrorMsg struct{ err error }
+type acpErrorMsg struct {
+	err   error
+	epoch int // turn generation; stale errors from abandoned turns are dropped
+}
 type usageUpdateMsg struct{ used, total int }
 type modeUpdateMsg struct{ mode string }
 type newSessionMsg struct {
@@ -747,6 +832,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // update applies a single message, returning the commands it produced. It is
 // the body of Update without the post-frame viewport sync.
 func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// History replay streams message by message; hold each one until the
+	// load completes. sessionLoadedMsg then applies the whole buffer in a
+	// single pass — the transcript appears at once instead of trickling in
+	// (one render per replayed message).
+	if m.replayBuffering {
+		switch msg.(type) {
+		case agentMessageMsg, agentThoughtMsg, userMessageMsg, toolCallMsg, planMsg:
+			m.replayBuf = append(m.replayBuf, msg)
+			return m, nil
+		}
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		return m.updateWindowSize(msg)
@@ -774,12 +870,37 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case permissionRequestMsg:
+		// A request racing a session reset (/new or session switch): with
+		// no active session there is nothing to approve for, and the
+		// dialog would intercept every keystroke on the fresh page —
+		// answer cancelled and drop it.
+		if m.activeSessionID == "" {
+			if msg.replyCh != nil {
+				msg.replyCh <- openacp.RequestPermissionResponse{
+					Outcome: openacp.RequestPermissionOutcome{Outcome: "cancelled"},
+				}
+			}
+			return m, nil
+		}
 		m.permissionReq = &msg.req
 		m.permissionReplyCh = msg.replyCh
 		m.permissionSelectedIdx = 0
+		// A leftover input draft from a previous dialog must not bleed in.
+		m.permInputMode = false
+		m.permTextarea.SetValue("")
 		m.viewportDirty = true
 		return m, nil
 
+	case quitArmTickMsg:
+		// The window lapsed (a re-arm resets the timestamp, so a stale tick
+		// from an earlier arm leaves a fresh arm alone).
+		if !m.quitArmedAt.IsZero() && time.Since(m.quitArmedAt) >= quitArmWindow-50*time.Millisecond {
+			m.quitArmedAt = time.Time{}
+			if m.notifyMsg == quitHint {
+				m.notifyMsg = ""
+			}
+		}
+		return m, nil
 	case retryingMsg:
 		m.retry = &retryState{
 			attempt: msg.attempt, max: msg.max, delay: msg.delay,
@@ -824,7 +945,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cancelPrompt()
 					return m, nil
 				}
-				return m, tea.Quit
+				return m, m.armQuit()
 			case "ctrl+p":
 				m.panelOpen = true
 				m.panelMode = panelModeCommand
@@ -1029,6 +1150,13 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		return m.handleMouseClick(msg)
+
+	case tea.MouseMotionMsg:
+		return m.handleMouseMotion(msg)
+
+	case tea.MouseReleaseMsg:
+		return m.handleMouseRelease(msg)
 
 	// ── ACP streaming events ──
 	case acpReadyMsg:
@@ -1083,7 +1211,11 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.trimMessageStore()
 		return m.markContentDirty()
 	case notifyClearMsg:
-		m.notifyMsg = ""
+		// A newer notify re-epochs toastID, so this stale timer leaves the
+		// replacement toast alone.
+		if msg.id == m.toastID {
+			m.notifyMsg = ""
+		}
 		return m, nil
 
 	case flushViewportMsg:
@@ -1095,6 +1227,11 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case promptDoneMsg:
+		if msg.epoch != m.turnEpoch {
+			// An abandoned turn's late landing (/new or session switch) —
+			// the fresh generation owns loading and the queue now.
+			return m, nil
+		}
 		m.retry = nil
 		if m.compacting {
 			// /compact round-trip finished: the compact block already shows
@@ -1137,6 +1274,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.title != "" {
 			m.sessionTitle = msg.title
 		}
+		return m, nil
+	case mcpServersMsg:
+		m.mcpServers = msg.servers
 		return m, nil
 	case contextCompactingMsg:
 		// History compaction started (auto, or manual /compact): open the
@@ -1254,10 +1394,14 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.panelIdx = 0
 		return m, nil
 	case sessionLoadedMsg:
+		buf := m.replayBuf
+		m.replayBuf = nil
 		m.loading = false
-		m.replaying = false
+		m.replayBuffering = false
 		m.pendingModelsPanel = false
 		if msg.err != nil {
+			m.applyReplayBuf(buf) // handlers still see replaying=true here
+			m.replaying = false
 			m.statusText = "Load session failed: " + msg.err.Error()
 			return m, nil
 		}
@@ -1270,6 +1414,8 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mode = msg.mode
 		}
 		m.statusText = ""
+		m.applyReplayBuf(buf)
+		m.replaying = false
 		m.needAutoScroll = true
 		m.viewportDirty = true
 		// A cold-start pick held pending (no session existed when the user
@@ -1354,6 +1500,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.trimMessageStore()
 		return m.markContentDirty()
 	case acpErrorMsg:
+		if msg.epoch != m.turnEpoch {
+			return m, nil // stale error from an abandoned turn
+		}
 		if m.compacting {
 			// A failed /compact round-trip: restore idle state and surface
 			// the error through the normal error path below.
@@ -1391,7 +1540,6 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	return m, nil
 }
 
 // permissionOptionAt returns the option index for a terminal Y coordinate,
@@ -1407,7 +1555,8 @@ func (m *Model) permissionOptionAt(y int) int {
 }
 
 // respondPermission sends the user's selection back to the ACP server via
-// the reply channel. idx >= 0 selects option[idx]; idx < 0 cancels.
+// the reply channel. idx >= 0 selects option[idx] (idx == len(Options) is
+// the synthetic "Custom..." chip); idx < 0 cancels.
 func (m *Model) respondPermission(idx int) {
 	if m.permissionReq == nil || m.permissionReplyCh == nil {
 		return
@@ -1427,10 +1576,108 @@ func (m *Model) respondPermission(idx int) {
 		}
 	}
 	m.permissionReplyCh <- resp
+	m.closePermissionDialog()
+}
+
+// respondPermissionInstead submits the free-text "do this instead"
+// instruction from the dialog's custom input. It rides the reject_once
+// outcome the server already understands: the text lands in the outcome's
+// feedback meta, the approver turns it into the deny reason, and the kernel
+// writes that reason into the tool result the model reads — so the agent
+// sees the user's instruction and adapts instead of executing the call.
+func (m *Model) respondPermissionInstead(text string) {
+	if m.permissionReq == nil || m.permissionReplyCh == nil {
+		return
+	}
+	optID := openacp.PermissionOptionId("reject_once")
+	m.permissionReplyCh <- openacp.RequestPermissionResponse{
+		Outcome: openacp.RequestPermissionOutcome{
+			Outcome:  "selected",
+			OptionID: &optID,
+			Meta:     map[string]any{"feedback": text},
+		},
+	}
+	m.closePermissionDialog()
+}
+
+// closePermissionDialog tears down the open dialog and its transient
+// custom-input state.
+// abandonPendingPermission answers an unanswered permission request with
+// the cancelled outcome and closes the dialog. Session resets (/new,
+// session load) must call it: the dialog intercepts every keystroke, so a
+// dialog left pending after a reset would make the fresh page mute.
+func (m *Model) abandonPendingPermission() {
+	if m.permissionReq != nil {
+		m.respondPermission(-1)
+	}
+}
+
+func (m *Model) closePermissionDialog() {
 	m.permissionReq = nil
 	m.permissionReplyCh = nil
+	m.permInputMode = false
+	m.permTextarea.SetValue("")
 	// The dialog closing unhides the pending tool rows it was suppressing.
 	m.viewportDirty = true
+}
+
+// newPermTextarea builds the dialog's free-text line: a slim one-row
+// surface-styled textarea with a block blinking cursor, matching the main
+// input's treatment.
+func newPermTextarea(width int) textarea.Model {
+	ta := textarea.New()
+	styles := textarea.Styles{}
+	styles.Focused.Base = theme.BaseStyle().Background(theme.BgSurface)
+	styles.Focused.Placeholder = theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.TextAsh)
+	styles.Focused.CursorLine = lipgloss.NewStyle().Background(theme.BgSurface)
+	styles.Focused.EndOfBuffer = theme.BaseStyle().Background(theme.BgSurface)
+	styles.Blurred.Base = theme.BaseStyle().Background(theme.BgSurface)
+	styles.Blurred.Placeholder = theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.TextAsh)
+	styles.Blurred.EndOfBuffer = theme.BaseStyle().Background(theme.BgSurface)
+	styles.Cursor = textarea.CursorStyle{
+		Color:      theme.TextNormal,
+		Shape:      tea.CursorBlock,
+		Blink:      true,
+		BlinkSpeed: 530 * time.Millisecond,
+	}
+	ta.SetStyles(styles)
+	ta.Prompt = ""
+	ta.ShowLineNumbers = false
+	ta.CharLimit = 4096
+	ta.SetWidth(width)
+	ta.SetHeight(1)
+	return ta
+}
+
+// enterPermInput swaps the dialog's chips for the free-text line, whose
+// placeholder points at the agent by its branded name (opencode's
+// "tell <agent> what to do instead").
+func (m *Model) enterPermInput() tea.Cmd {
+	m.permTextarea = newPermTextarea(permInputWidth(m.getContentWidth()))
+	m.permTextarea.Placeholder = fmt.Sprintf("tell %s what to do instead", version.Name)
+	m.permTextarea.Focus()
+	m.permTextarea.CursorEnd()
+	m.permInputMode = true
+	// Kick the cursor blink so the block cycles like the main input's.
+	return func() tea.Msg { return textarea.Blink() }
+}
+
+// permInputWidth sizes the custom-input line: the panel's inner width
+// minus the strip padding and the key-hint tail rendered beside it.
+func permInputWidth(contentWidth int) int {
+	return max(12, contentWidth-1-permInputTipsWidth)
+}
+
+// armQuit gates quitting behind two ctrl+c within quitArmWindow. The first
+// press arms the intent and toasts a hint; the tick (or any later state
+// change through the Update case) disarms when the window lapses.
+func (m *Model) armQuit() tea.Cmd {
+	if !m.quitArmedAt.IsZero() && time.Since(m.quitArmedAt) <= quitArmWindow {
+		return tea.Quit
+	}
+	m.quitArmedAt = time.Now()
+	m.notifyMsg = quitHint
+	return tea.Tick(quitArmWindow, func(time.Time) tea.Msg { return quitArmTickMsg{} })
 }
 
 // escPressed implements Esc outside the permission dialog: it clears the
@@ -1516,13 +1763,32 @@ func (m *Model) runSlashCommand(text string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// notify shows a transient success toast; it auto-clears after
-// notifyDuration. Callers should return the returned cmd from Update.
+// SetConfiguredMcpServers seeds the MCP picture from settings before any
+// session exists; the first wire snapshot replaces it with live outcomes.
+func (m *Model) SetConfiguredMcpServers(servers []openacp.McpServerStatus) {
+	m.mcpConfigured = servers
+}
+
+// knownMcpServers returns the freshest MCP picture: live wire outcomes once
+// a session has reported them, else the settings-configured list.
+func (m *Model) knownMcpServers() []openacp.McpServerStatus {
+	if len(m.mcpServers) > 0 {
+		return m.mcpServers
+	}
+	return m.mcpConfigured
+}
+
+// notify shows a transient toast (a floating box in the top-right corner,
+// see renderToast); it auto-clears after notifyDuration. Callers should
+// return the returned cmd from Update. Each call re-epochs toastID so an
+// overlapping earlier timer cannot clear the newer toast.
 func (m *Model) notify(text string) tea.Cmd {
 	m.notifyMsg = text
+	m.toastID++
+	id := m.toastID
 	return func() tea.Msg {
 		time.Sleep(notifyDuration)
-		return notifyClearMsg{}
+		return notifyClearMsg{id: id}
 	}
 }
 
@@ -1554,6 +1820,15 @@ func (m *Model) trimMessageStore() {
 // instead of re-rendering the whole viewport on every chunk. Discrete,
 // non-streaming changes flush immediately.
 func (m *Model) markContentDirty() (tea.Model, tea.Cmd) {
+	// Transcript content changed: doc rows shifted under any existing box
+	// selection, so the highlight (anchored to doc coordinates) would paint
+	// the wrong text — drop it. A drag in flight survives: streaming only
+	// appends rows below the selection, so its anchored rows stay put, and
+	// killing the gesture mid-stream makes selection unusable exactly while
+	// the agent is replying.
+	if !m.selection.active {
+		m.clearSelection()
+	}
 	if !m.loading {
 		m.renderPending = false
 		m.viewportDirty = true
@@ -1612,15 +1887,16 @@ func (m *Model) sendPrompt(text string) {
 	if sess == nil || ctx == nil || program == nil {
 		return
 	}
+	ep := m.turnEpoch
 	go func() {
 		resp, err := sess.Prompt(ctx, openacp.PromptRequest{
 			Prompt: []openacp.ContentBlock{{Type: "text", Text: text}},
 		})
 		if err != nil {
-			program.Send(acpErrorMsg{err: err})
+			program.Send(acpErrorMsg{err: err, epoch: ep})
 			return
 		}
-		program.Send(promptDoneMsg{steps: acpMetaInt(resp.Meta, "turn_count")})
+		program.Send(promptDoneMsg{steps: acpMetaInt(resp.Meta, "turn_count"), epoch: ep})
 	}()
 }
 
@@ -1695,6 +1971,12 @@ func (m *Model) executeCommand(pc panelCommand) (tea.Model, tea.Cmd) {
 		if m.loading {
 			m.cancelPrompt()
 		}
+		// A pending permission request MUST be answered before the reset:
+		// the dialog intercepts every keystroke, so leaving it pending
+		// would leave the fresh welcome page mute. The abandoned turn's
+		// late bookkeeping is fenced off by turnEpoch.
+		m.abandonPendingPermission()
+		m.turnEpoch++
 		m.activeSessionID = ""
 		m.sessionTitle = ""
 		m.messages = nil
@@ -1770,6 +2052,13 @@ func (m *Model) executeCommand(pc panelCommand) (tea.Model, tea.Cmd) {
 		return m.cycleTheme()
 	case actionPlugins:
 		return m.openPluginsPanel()
+	case actionStatus:
+		m.panelOpen = true
+		m.panelMode = panelModeStatus
+		m.panelFromSlash = false // centered
+		m.panelFilter = ""
+		m.panelIdx = 0
+		return m, nil
 	case actionSplit:
 		m.splitView = !m.splitView
 		m.viewportDirty = true
@@ -2058,6 +2347,8 @@ func (m *Model) execSelectedSession() (tea.Model, tea.Cmd) {
 	// Enter the chat view: a session picked straight from the welcome page
 	// must leave the welcome screen, or the replayed transcript would stay
 	// invisible (View renders welcome until inChat is set).
+	m.abandonPendingPermission()
+	m.turnEpoch++
 	m.inChat = true
 	m.messages = nil
 	// The target session's own replay re-counts turns; usage waits for its
@@ -2066,6 +2357,7 @@ func (m *Model) execSelectedSession() (tea.Model, tea.Cmd) {
 	m.lastTurnSteps, m.sessionSteps = 0, 0
 	m.loading = true
 	m.replaying = true
+	m.replayBuffering = true
 	m.statusText = "Loading session..."
 	return m, m.loadSessionCmd(item.id, item.title)
 }
@@ -2095,6 +2387,15 @@ func (m *Model) loadSessionCmd(id, title string) tea.Cmd {
 			msg.mode = string(resp.Modes.CurrentModeID)
 		}
 		return msg
+	}
+}
+
+// applyReplayBuf runs the history messages buffered during a session load
+// through the normal handlers in arrival order — one pass, so all the
+// dirty-marking collapses into the single refeed the caller triggers after.
+func (m *Model) applyReplayBuf(buf []tea.Msg) {
+	for _, bm := range buf {
+		_, _ = m.update(bm) // pointer receiver: state mutates in place
 	}
 }
 
@@ -2390,6 +2691,9 @@ func (m *Model) updateWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	m.chatViewport.SetWidth(layout.GetTranscriptWidth(m.width))
 	m.chatViewport.SetHeight(layout.GetViewHeight(m.height))
 	m.updateInputWidth()
+	if m.permInputMode {
+		m.permTextarea.SetWidth(permInputWidth(m.getContentWidth()))
+	}
 	m.viewportDirty = true
 	m.textareaDirty = true
 	return m, nil
@@ -2623,12 +2927,16 @@ func (m *Model) turnDuration(i int, msg ChatMessage) time.Duration {
 }
 
 // modeBadge returns the session mode label and its badge color (Auto
-// primary, Manual green, Plan notify). An unknown non-empty mode falls back
-// to the raw value in normal text, an empty mode to "" (no badge).
+// primary, Manual green, Plan notify, Semi-Auto warning — it auto-allows
+// safe calls but still prompts for destructive ones). An unknown non-empty
+// mode falls back to the raw value in normal text, an empty mode to ""
+// (no badge).
 func (m *Model) modeBadge() (string, color.Color) {
 	switch m.mode {
 	case "auto":
 		return "Auto", theme.Primary
+	case "semi-auto":
+		return "Semi-Auto", theme.Warning
 	case "manual":
 		return "Manual", theme.Success
 	case "plan":

@@ -15,11 +15,13 @@ import (
 // The viewport is fed a *windowed* document: messages whose row range
 // intersects the visible window are styled (through the per-message render
 // cache) and their rows are emitted verbatim; every other row is a cheap
-// placeholder. Styling cost is proportional to the visible window plus a
-// one-time pass that measures every message's exact rendered height (the
-// cache makes the measurement free after the first feed). Positioning uses
-// those exact heights — the rows actually drawn come from the styled
-// blocks, so window math and drawn rows can never drift apart.
+// placeholder. Heights come from the render cache when the block was
+// already styled (exact, free); cache misses estimate without styling —
+// measuring every message up front is what made long-session loads slow.
+// The settle pass in renderVirtualDocAt styles the window band and
+// re-locates the window on exact heights before rows are cut, so drawn
+// rows and window math never drift within what is visible; off-window
+// estimates only shift the placeholder bulk and self-correct on reveal.
 
 // placeholderRow is the muted gutter row shown for off-window lines. The
 // padding is measured with the same width function fitRow uses, so the row
@@ -59,22 +61,100 @@ func fitRow(row string, vpW int) string {
 	}
 }
 
-// virtualLineHeights returns the exact rendered height of every message, in
-// viewport rows. Heights come from the styled blocks themselves (through the
-// per-message render cache, so each block is styled once) — any estimate
-// drifts from reality as soon as the card chrome changes, and a short
-// estimate makes the virtual window cut the block's bottom padding and
-// margin rows off. Hidden (visibility-gated) messages occupy no rows.
+// virtualLineHeights returns the rendered height of every message, in
+// viewport rows. Heights come from the per-message render cache when the
+// block was already styled (exact, free); cache misses estimate without
+// styling — styling every block up front is what made long-session loads
+// slow, and off-window rows are placeholders anyway. The real render
+// replaces the estimate as the window reveals the block (the settle pass
+// in renderVirtualDocAt re-locates the window on exact heights first, so
+// a visible block is never clipped by its own estimate). Hidden
+// (visibility-gated) messages occupy no rows.
 func (m *Model) virtualLineHeights(vpW int) []int {
 	h := make([]int, len(m.messages))
 	for i := range m.messages {
-		block, skip := m.renderMessageBlock(i, m.messages[i], vpW)
-		if skip || block == "" {
+		if hh, ok := m.cachedMessageHeight(i, m.messages[i], vpW); ok {
+			h[i] = hh
 			continue
 		}
-		h[i] = strings.Count(block, "\n") + 1
+		h[i] = m.estimateMessageHeight(i, m.messages[i], vpW)
 	}
 	return h
+}
+
+// cachedMessageHeight returns the height of message i from an existing
+// render-cache entry (free). ok=false on miss or when the entry is stale
+// for the current width/state. A gated-out message reports (0, true) — it
+// occupies no rows.
+func (m *Model) cachedMessageHeight(i int, msg ChatMessage, vpW int) (int, bool) {
+	if msg.Seq == 0 {
+		return 0, false
+	}
+	e, ok := m.renderCache[msg.Seq]
+	if !ok {
+		return 0, false
+	}
+	turnEnd := m.isTurnEndAt(i, msg)
+	if !renderCacheHits(e, msg, vpW, m.loading, m.replaying, turnEnd, m.permissionReq != nil, m.visibleConfig) {
+		return 0, false
+	}
+	if e.skip || e.block == "" {
+		return 0, true
+	}
+	return strings.Count(e.block, "\n") + 1, true
+}
+
+// estimateMessageHeight approximates a block's row count without styling,
+// mirroring styleMessageBlock's role branches and visibility gates
+// coarsely — ± a couple of rows is fine: off-window rows are placeholders,
+// and the settle pass swaps in exact heights before rows are cut.
+func (m *Model) estimateMessageHeight(i int, msg ChatMessage, vpW int) int {
+	w := max(20, vpW-transcriptIndent-2) // inner text width, coarse
+	rows := 2                            // card chrome: padding + separator rows
+	switch msg.Role {
+	case "thought":
+		expanded := m.visibleConfig.ExpandThinking || (msg.ThoughtEnd.IsZero() && m.loading)
+		if expanded {
+			rows += 1 + wrappedRows(msg.Content, w)
+		} else {
+			rows++
+		}
+	case "compact":
+		rows += wrappedRows(msg.Content, w)
+	case "tool":
+		if isSkillTool(msg.ToolName) && !m.visibleConfig.ShowToolSkill {
+			return 0
+		}
+		if isShellTool(msg.ToolName) && !m.visibleConfig.ShowToolShell {
+			return 0
+		}
+		if msg.ToolStatus == toolPending && m.permissionReq != nil {
+			return 0
+		}
+		rows++ // status line
+		if m.visibleConfig.ShowToolDetail && msg.ToolOutput != "" {
+			rows += min(strings.Count(msg.ToolOutput, "\n")+1, defaultToolOutputLines) + 1
+		}
+	default:
+		rows += wrappedRows(msg.Content, w)
+	}
+	if m.isTurnEndAt(i, msg) {
+		rows += 3 // marker row with a blank row on each side
+	}
+	return rows
+}
+
+// wrappedRows counts display rows for text at width w: hard lines plus
+// wrapped overflow, display-width aware (CJK counts double).
+func wrappedRows(text string, w int) int {
+	if text == "" {
+		return 0
+	}
+	n := 0
+	for _, ln := range strings.Split(text, "\n") {
+		n += max(1, (utils.DisplayWidth(ln)+w-1)/w)
+	}
+	return n
 }
 
 // virtualPrefixLines returns the document row at which message idx starts:
@@ -163,6 +243,28 @@ func (m *Model) renderVirtualDocAt(height, offset int) string {
 	msgWinEnd := msgWinStart + windowH
 	first, startWithin := messageAtLine(heights, max(0, msgWinStart))
 	last, _ := messageAtLine(heights, max(0, msgWinEnd-1))
+
+	// Settle pass: cache misses stand in as estimates, so style the window
+	// band (± one screen of context) now — the exact heights replace the
+	// estimates and the window re-locates once before any row is cut, so a
+	// visible block is never clipped by its own estimate.
+	const band = 1 // in screens
+	lo := first
+	for rows, i := 0, first; i >= 0 && rows < band*windowH; i-- {
+		rows += heights[i]
+		lo = i
+	}
+	hi := last
+	for rows, i := 0, last; i < len(heights) && rows < band*windowH; i++ {
+		rows += heights[i]
+		hi = i
+	}
+	for i := lo; i <= hi; i++ {
+		m.renderMessageBlock(i, m.messages[i], vpW)
+	}
+	heights = m.virtualLineHeights(vpW)
+	first, startWithin = messageAtLine(heights, max(0, msgWinStart))
+	last, _ = messageAtLine(heights, max(0, msgWinEnd-1))
 
 	var b strings.Builder
 	// Off-window bulk is the dominant part of the document at large offsets

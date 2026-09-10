@@ -53,6 +53,11 @@ var (
 	TrackBackGroundActive = BgSurface
 	ThumbBackGroundDrag   = lipgloss.Color("#666666")
 
+	// SelectionBg paints the transcript's in-app box selection. Dark blue:
+	// visible on both the page black and the card surface while keeping the
+	// existing foregrounds readable.
+	SelectionBg = lipgloss.Color("#26466d")
+
 	// command palette colors
 	CommandActive   = lipgloss.Color("#fab283")
 	CommandInactive = lipgloss.Color("#995f06")
@@ -110,6 +115,7 @@ func Reset() {
 	ThumbBackGroundActive = lipgloss.Color("#545454")
 	TrackBackGroundActive = lipgloss.Color("#1c1c1c")
 	ThumbBackGroundDrag = lipgloss.Color("#666666")
+	SelectionBg = lipgloss.Color("#26466d")
 	CommandActive = lipgloss.Color("#fab283")
 	CommandInactive = lipgloss.Color("#995f06")
 }
@@ -155,6 +161,8 @@ func ApplyOverrides(overrides map[string]string) {
 			TextAsh = c
 		case "border_gray":
 			BorderGray = c
+		case "selection_bg":
+			SelectionBg = c
 		case "logo_color":
 			LogoColor = c
 			logoSet = true
@@ -172,6 +180,13 @@ func ApplyOverrides(overrides map[string]string) {
 var _ color.Color = BgNormal
 
 var sgrResetRe = regexp.MustCompile(`\x1b\[(0(;\d+)*)?m`)
+
+// ColorBgCode exposes the SGR truecolor background sequence for a palette
+// color, for renderers that repaint individual cells outside lipgloss
+// (the transcript's box-selection overlay).
+func ColorBgCode(c color.Color) string {
+	return colorBgCode(c)
+}
 
 func colorBgCode(c color.Color) string {
 	rgbC := color.RGBAModel.Convert(c)

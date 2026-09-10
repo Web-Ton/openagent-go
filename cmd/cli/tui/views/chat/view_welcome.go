@@ -1,6 +1,8 @@
 package chat
 
 import (
+	"fmt"
+	"image/color"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -53,8 +55,14 @@ func (m *Model) renderWelcome(geom *viewGeom) string {
 	full := lipgloss.Place(m.width, m.height-2, lipgloss.Center, lipgloss.Top, content, lipgloss.WithWhitespaceStyle(theme.BaseStyle()))
 
 	workDirValue := theme.BaseStyle().PaddingLeft(1).Foreground(theme.TextAsh).Render(m.workDir)
-	versionValue := theme.BaseStyle().Width(m.width - lipgloss.Width(workDirValue)).PaddingRight(1).Align(lipgloss.Right).Foreground(theme.TextAsh).Render(m.version)
-	footer := lipgloss.JoinHorizontal(lipgloss.Left, workDirValue, versionValue)
+	// MCP indicator (⊙ N MCP) sits right of the workdir in the bottom-left
+	// corner; absent when no server is configured.
+	left := workDirValue
+	if ind := m.mcpIndicator(); ind != "" {
+		left = lipgloss.JoinHorizontal(lipgloss.Left, workDirValue, ind)
+	}
+	versionValue := theme.BaseStyle().Width(m.width - lipgloss.Width(left)).PaddingRight(1).Align(lipgloss.Right).Foreground(theme.TextAsh).Render(m.version)
+	footer := lipgloss.JoinHorizontal(lipgloss.Left, left, versionValue)
 
 	return theme.BaseStyle().Width(m.width).Height(m.height).Render(
 		lipgloss.JoinVertical(lipgloss.Top,
@@ -84,6 +92,31 @@ func (m *Model) welcomeInner() string {
 		theme.BaseStyle().Width(w).Render(""),
 		theme.BaseStyle().Width(w).Align(lipgloss.Center).Render(m.tips),
 	)
+}
+
+// mcpIndicator renders the welcome footer's MCP segment ("⊙ 1 MCP
+// /status", opencode style): a green ring-dot when no known server failed,
+// warning orange when one did; empty when no MCP server is configured.
+// "/status" is the dim hint for the command opening the detail panel.
+func (m *Model) mcpIndicator() string {
+	servers := m.knownMcpServers()
+	if len(servers) == 0 {
+		return ""
+	}
+	col := color.Color(theme.Success)
+	for _, srv := range servers {
+		if srv.Status == "failed" {
+			col = theme.Warning
+			break
+		}
+	}
+	dot := theme.BaseStyle().Foreground(col).Render("⊙")
+	count := theme.BaseStyle().Foreground(theme.TextNormal).Bold(true).
+		Render(fmt.Sprintf("%d MCP", len(servers)))
+	hint := theme.BaseStyle().Foreground(theme.TextMute).Render("/status")
+	sep := theme.BaseStyle().Render(" ")
+	return theme.BaseStyle().PaddingLeft(2).
+		Render(lipgloss.JoinHorizontal(lipgloss.Left, dot, sep, count, sep, hint))
 }
 
 // welcomeLogo renders the welcome-page logo art at the given column width.

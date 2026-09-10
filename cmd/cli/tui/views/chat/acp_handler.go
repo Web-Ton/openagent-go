@@ -183,6 +183,10 @@ func (h *acpEventHandler) OnSessionInfo(title string, metadata map[string]any) {
 	h.program.Send(sessionInfoMsg{title: title})
 }
 
+func (h *acpEventHandler) OnMcpServers(servers []openacp.McpServerStatus) {
+	h.program.Send(mcpServersMsg{servers: servers})
+}
+
 // ── ClientRequestHandler ──
 
 // HandleRequestPermission sends the permission request to the TUI via

@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -144,9 +145,11 @@ func TestPromptCountTracked(t *testing.T) {
 	}
 }
 
-// TestSidebarShowsContextTurnsAndPlanProgress checks the right sidebar's
-// data section: context usage, turn count, and the plan progress title.
-func TestSidebarShowsContextTurnsAndPlanProgress(t *testing.T) {
+// TestSidebarShowsContextMcpAndPlanProgress checks the right sidebar's
+// data section: context usage, the MCP server list, and the plan progress
+// title. Turns and Steps were dropped from the sidebar (turn-scoped step
+// counts live on the transcript's turn-end row instead).
+func TestSidebarShowsContextMcpAndPlanProgress(t *testing.T) {
 	m := newTestModel()
 	m.width = 120
 	m.height = 36
@@ -154,15 +157,52 @@ func TestSidebarShowsContextTurnsAndPlanProgress(t *testing.T) {
 	m.usedTokens = 12300
 	m.contextSize = 1000000
 	m.promptCount = 7
+	m.mcpServers = []openacp.McpServerStatus{
+		{Name: "iac-server", Status: "connected", Tools: 12},
+		{Name: "broken", Status: "failed"},
+	}
 	m.planEntries = []openacp.PlanEntry{
 		{Content: "step one", Status: "completed"},
 		{Content: "step two", Status: "in_progress"},
 	}
 	right := utils.StripANSI(m.renderRight())
-	for _, want := range []string{"12,300 tokens", "1% used", "Turns", "7", "Plans 1/2", "[▶] step two"} {
+	for _, want := range []string{"12,300 tokens", "1% used", "MCP", "iac-server", "broken", "Plans 1/2", "[▶] step two"} {
 		if !strings.Contains(right, want) {
 			t.Errorf("sidebar missing %q:\n%s", want, right)
 		}
+	}
+	if strings.Contains(right, "Turns") || strings.Contains(right, "Steps") {
+		t.Errorf("sidebar must not show Turns/Steps sections:\n%s", right)
+	}
+}
+
+// TestSidebarMcpEmptyAndOverflow checks the MCP section's degenerate shapes:
+// no servers renders the muted "none" placeholder, and a long list caps at
+// maxMcpRows with a trailing "… N more" row.
+func TestSidebarMcpEmptyAndOverflow(t *testing.T) {
+	m := newTestModel()
+	m.width = 120
+	m.height = 36
+	right := utils.StripANSI(m.renderRight())
+	if !strings.Contains(right, "MCP") || !strings.Contains(right, "none") {
+		t.Fatalf("empty MCP section must render the none placeholder:\n%s", right)
+	}
+
+	m.mcpServers = make([]openacp.McpServerStatus, 0, 9)
+	for i := 0; i < 9; i++ {
+		m.mcpServers = append(m.mcpServers, openacp.McpServerStatus{
+			Name: fmt.Sprintf("server-%d", i), Status: "connected",
+		})
+	}
+	right = utils.StripANSI(m.renderRight())
+	if !strings.Contains(right, "server-5") {
+		t.Fatalf("first maxMcpRows servers must render:\n%s", right)
+	}
+	if strings.Contains(right, "server-6") {
+		t.Fatalf("servers past the cap must not render:\n%s", right)
+	}
+	if !strings.Contains(right, "… 3 more") {
+		t.Fatalf("overflow row missing:\n%s", right)
 	}
 }
 
@@ -224,11 +264,78 @@ func TestCtrlCCancelsWhenLoading(t *testing.T) {
 	}
 }
 
-func TestCtrlCQuitsWhenIdle(t *testing.T) {
+// isQuitCmd identifies tea.Quit among returned commands (armQuit's tick is
+// indistinguishable from a quit by nil-checking alone).
+func isQuitCmd(cmd tea.Cmd) bool {
+	return cmd != nil && reflect.ValueOf(cmd).Pointer() == reflect.ValueOf(tea.Quit).Pointer()
+}
+
+// TestCtrlCQuitNeedsDoublePress pins the quit gate: an idle ctrl+c only
+// arms the intent (hint toast, tick scheduled); a second press inside
+// quitArmWindow quits; a press after the window lapsed re-arms instead.
+func TestCtrlCQuitNeedsDoublePress(t *testing.T) {
 	m := newTestModel()
+
 	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
-	if cmd == nil {
-		t.Fatal("ctrl+c while idle should quit")
+	if isQuitCmd(cmd) {
+		t.Fatal("a single idle ctrl+c must not quit")
+	}
+	if m.quitArmedAt.IsZero() || m.notifyMsg != quitHint {
+		t.Fatalf("first ctrl+c must arm the quit intent, got armed=%v hint=%q", m.quitArmedAt.IsZero(), m.notifyMsg)
+	}
+
+	if _, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}); !isQuitCmd(cmd) {
+		t.Fatal("a second ctrl+c within the window must quit")
+	}
+}
+
+// TestCtrlCQuitArmExpires checks the 3s lapse: an arm older than the window
+// does not turn the next ctrl+c into a quit — it re-arms instead.
+func TestCtrlCQuitArmExpires(t *testing.T) {
+	m := newTestModel()
+	m.quitArmedAt = time.Now().Add(-quitArmWindow - time.Second)
+	m.notifyMsg = quitHint
+
+	// The lapse tick disarms and clears the hint.
+	upd, _ := m.Update(quitArmTickMsg{})
+	m = upd.(*Model)
+	if !m.quitArmedAt.IsZero() || m.notifyMsg != "" {
+		t.Fatalf("tick must disarm, got armed=%v hint=%q", !m.quitArmedAt.IsZero(), m.notifyMsg)
+	}
+
+	// A fresh press re-arms (a stale arm must not quit).
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if isQuitCmd(cmd) {
+		t.Fatal("ctrl+c on a lapsed arm must re-arm, not quit")
+	}
+}
+
+// TestCtrlCQuitGatedOverPermissionDialog checks the gate on the approval
+// dialog: ctrl+c arms instead of killing the session with the request
+// unanswered; the second press quits.
+func TestCtrlCQuitGatedOverPermissionDialog(t *testing.T) {
+	m := newTestModel()
+	m.activeSessionID = "sess-1" // no session → requests are auto-cancelled
+	replyCh := make(chan openacp.RequestPermissionResponse, 1)
+	m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
+		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1"},
+		Options:  []openacp.PermissionOption{{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce}},
+	}, replyCh: replyCh})
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if isQuitCmd(cmd) {
+		t.Fatal("ctrl+c over an open dialog must arm, not quit")
+	}
+	if m.permissionReq == nil {
+		t.Fatalf("arming must leave the dialog open")
+	}
+	if _, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}); !isQuitCmd(cmd) {
+		t.Fatal("second ctrl+c over the dialog must quit")
+	}
+	select {
+	case resp := <-replyCh:
+		t.Fatalf("quitting must not answer the dialog: %+v", resp)
+	default:
 	}
 }
 
@@ -1466,11 +1573,16 @@ func TestTurnEndMarkerLegacyRowsHidden(t *testing.T) {
 		{Role: "assistant", Content: "a1", TurnId: 1},
 	}
 	vpW := layout.GetTranscriptWidth(m.width)
+	// Style first so the heights come from the render cache (exact) —
+	// unstyled messages are estimated, not measured.
+	for i, msg := range m.messages {
+		m.renderMessageBlock(i, msg, vpW)
+	}
+	heights := m.virtualLineHeights(vpW)
 	for i, msg := range m.messages {
 		if m.isTurnEndAt(i, msg) {
 			t.Errorf("legacy row %d must not be a turn-end carrier", i)
 		}
-		heights := m.virtualLineHeights(vpW)
 		block, skip := m.renderMessageBlock(i, msg, vpW)
 		if skip {
 			continue
@@ -1989,7 +2101,7 @@ func TestModePanelAppliesViaSetConfigOption(t *testing.T) {
 // TestTurnStepsOnMarkerAndSidebar pins the steps plumbing: the finished
 // prompt's kernel turn count (response _meta.turn_count) lands on the
 // turn-end marker ("N steps", alongside the retry segment) and accumulates
-// in the sidebar's session Steps counter.
+// in the session counter — which the sidebar no longer renders.
 func TestTurnStepsOnMarkerAndSidebar(t *testing.T) {
 	m := newTestModel()
 	m.width, m.height = 100, 40
@@ -2024,8 +2136,8 @@ func TestTurnStepsOnMarkerAndSidebar(t *testing.T) {
 		t.Errorf("steps = %d/%d, want last 3 / session 10", m.lastTurnSteps, m.sessionSteps)
 	}
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
-	if got := m.View().Content; !strings.Contains(got, "Steps") || !strings.Contains(got, "10") {
-		t.Errorf("sidebar must show the cumulative Steps counter:\n%s", got)
+	if got := m.View().Content; strings.Contains(got, "Steps") {
+		t.Errorf("sidebar must not show a Steps section:\n%s", got)
 	}
 
 	// An unknown count (aborted / older peer) accumulates nothing.
@@ -2074,6 +2186,7 @@ func TestRetryingRowLifecycle(t *testing.T) {
 // panel itself shows the call), and comes back once the dialog resolves.
 func TestPendingToolHiddenWhilePermissionOpen(t *testing.T) {
 	m := newTestModel()
+	m.activeSessionID = "sess-1" // no session → requests are auto-cancelled
 	m.width, m.height = 100, 40
 	m.inChat = true
 	m.messages = []ChatMessage{
@@ -2611,9 +2724,72 @@ func TestNotifyToastAutoClears(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("notify must return an auto-clear cmd")
 	}
-	upd, _ := m.Update(notifyClearMsg{})
+	upd, _ := m.Update(notifyClearMsg{id: m.toastID})
 	if upd.(*Model).notifyMsg != "" {
 		t.Error("notifyClearMsg should clear the toast")
+	}
+}
+
+func TestNotifyToastStaleClearIgnored(t *testing.T) {
+	m := newTestModel()
+	m.notify("Session created")
+	m.notify("Copied 12 chars")
+	// The first toast's timer fires late; the second toast must survive it.
+	upd, _ := m.Update(notifyClearMsg{id: m.toastID - 1})
+	if upd.(*Model).notifyMsg != "Copied 12 chars" {
+		t.Errorf("stale clear dropped the newer toast, got %q", upd.(*Model).notifyMsg)
+	}
+}
+
+func TestToastFloatsTopRightNotInStatusBar(t *testing.T) {
+	m := newTestModel()
+	m.inChat = true
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m.notify("Copied 12 chars")
+	lines := strings.Split(utils.StripANSI(m.View().Content), "\n")
+	// Box rows start at y=2; the right edge aligns with the transcript
+	// viewport's last column (GetLeftWidth(120)=80 → viewport cols 1..76),
+	// hugging the message: ┃ + 2sp + text + 2sp + ┃.
+	const boxCol = 76 // last toast column
+	mid := []rune(strings.TrimRight(lines[3], " "))
+	if string(mid[boxCol]) != "┃" {
+		t.Fatalf("toast right edge at col %d = %q, want ┃", boxCol, string(mid[boxCol]))
+	}
+	boxStart := boxCol - 20 // 21-rune box
+	if got := string(mid[boxStart : boxCol+1]); got != "┃  Copied 12 chars  ┃" {
+		t.Errorf("toast box = %q, want shrink-wrapped ┃  Copied 12 chars  ┃", got)
+	}
+	for _, row := range []int{2, 4} {
+		r := []rune(strings.TrimRight(lines[row], " "))
+		if len(r) <= boxCol || string(r[boxCol]) != "┃" {
+			t.Errorf("padding row %d must carry the toast bar at col %d: %q", row, boxCol, lines[row])
+		}
+	}
+	if strings.Contains(lines[len(lines)-1], "Copied") {
+		t.Errorf("status bar must keep persistent content, got %q", lines[len(lines)-1])
+	}
+}
+
+func TestToastWrapsLongMessageAtCap(t *testing.T) {
+	m := newTestModel()
+	m.inChat = true
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m.notify(strings.Repeat("word ", 16)) // 80 columns > 60-cap, word-wraps
+	lines := strings.Split(utils.StripANSI(m.View().Content), "\n")
+	// 2 wrapped text rows + 2 padding rows: box spans rows 2..5, capped at
+	// 60 wide with its right edge on the transcript's last column (76).
+	const boxCol = 76
+	for _, row := range []int{2, 3, 4, 5} {
+		r := []rune(strings.TrimRight(lines[row], " "))
+		if len(r) <= boxCol || string(r[boxCol]) != "┃" {
+			t.Fatalf("wrapped toast row %d missing right bar at col %d: %q", row, boxCol, lines[row])
+		}
+		if got := string(r[boxCol-59]); got != "┃" {
+			t.Fatalf("wrapped toast row %d left bar at col %d = %q, want ┃ (60-wide box)", row, boxCol-59, got)
+		}
+	}
+	if r := []rune(strings.TrimRight(lines[6], " ")); len(r) > boxCol && string(r[boxCol]) == "┃" {
+		t.Error("row 6 must be below the wrapped toast box")
 	}
 }
 
@@ -2628,6 +2804,428 @@ func TestConfigSetMsgReturnsNotifyCmd(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Error("toast should auto-clear (non-nil cmd)")
+	}
+}
+
+func TestPermissionDisplayTitleMcp(t *testing.T) {
+	cases := map[string]string{
+		"mcp__agent-browser__agent_browser_check": "agent-browser: agent_browser_check",
+		"shell bun install":                       "shell bun install",
+		"mcp__lonely":                             "mcp__lonely",
+	}
+	for in, want := range cases {
+		if got := permissionDisplayTitle(in); got != want {
+			t.Errorf("permissionDisplayTitle(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// openPermissionPanel builds a model with a pending permission request at
+// the given terminal size and returns it along with the panel's raw (ANSI
+// intact) rendering at the width View() uses.
+func openPermissionPanel(t *testing.T, termW int) (*Model, string) {
+	t.Helper()
+	m := newTestModel()
+	m.activeSessionID = "sess-1" // no session → requests are auto-cancelled
+	m.Update(tea.WindowSizeMsg{Width: termW, Height: 36})
+	replyCh := make(chan openacp.RequestPermissionResponse, 1)
+	m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
+		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1", Kind: "execute", Title: "mcp__agent-browser__agent_browser_check"},
+		Options: []openacp.PermissionOption{
+			{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce},
+			{OptionID: "allow_always", Name: "Allow always", Kind: openacp.PermissionAllowAlways},
+			{OptionID: "reject_once", Name: "Reject", Kind: openacp.PermissionRejectOnce},
+		},
+	}, replyCh: replyCh})
+	w := m.getContentWidth() - 1
+	return m, m.renderPermissionPanel(w, 0)
+}
+
+// TestPermissionPanelTipsRightAligned pins the strip layout: chips on the
+// left, key hints right-aligned at the panel's far edge (opencode's
+// layout), and MCP titles read as "server: tool", not wire noise.
+func TestPermissionPanelTipsRightAligned(t *testing.T) {
+	m, raw := openPermissionPanel(t, 190)
+	doc := utils.StripANSI(raw)
+	if !strings.Contains(doc, "agent-browser: agent_browser_check") {
+		t.Errorf("mcp title not prettified:\n%s", doc)
+	}
+	w := m.getContentWidth() - 1
+	for _, line := range strings.Split(doc, "\n") {
+		if !strings.Contains(line, "↑ ↓") {
+			continue
+		}
+		if !strings.HasSuffix(line, "select ") {
+			t.Errorf("tips not right-aligned (one trail column expected): %q", line)
+		}
+		if got := utils.DisplayWidth(line); got != w {
+			t.Errorf("strip row width = %d, want %d: %q", got, w, line)
+		}
+		return
+	}
+	t.Fatalf("chips/tips row not found:\n%s", doc)
+}
+
+// TestPermissionPanelRowsFilledToWidth guards the black-patch regression:
+// every panel row spans the full content box AND its tail carries the row
+// background — lipgloss pads fitting blocks with plain spaces, so a row
+// that relies on the outer Width() for its background ends in unstyled
+// (transparent) columns right after the text.
+func TestPermissionPanelRowsFilledToWidth(t *testing.T) {
+	m, raw := openPermissionPanel(t, 190)
+	w := m.getContentWidth() - 1
+	bgSeq, _, _ := strings.Cut(theme.BaseStyle().Background(theme.BgPanel).Render(" "), " ")
+	for i, line := range strings.Split(raw, "\n") {
+		if got := utils.DisplayWidth(line); got != w {
+			t.Errorf("row %d width = %d, want %d (overflow word-wraps the panel): %q", i, got, w, utils.StripANSI(line))
+		}
+		if title := strings.Index(line, "Permission required"); title >= 0 {
+			if tail := line[title+len("Permission required"):]; !strings.Contains(tail, bgSeq) {
+				t.Errorf("header row tail has no panel-background fill:\n%q", line)
+			}
+		}
+	}
+}
+
+// TestPermissionPanelNarrowStacksTips covers the narrow terminal: when
+// chips and hints cannot share a row, the hints drop to their own
+// right-aligned strip row instead of wrapping mid-hint.
+func TestPermissionPanelNarrowStacksTips(t *testing.T) {
+	_, raw := openPermissionPanel(t, 80)
+	var chipRow, tipsRow string
+	for _, line := range strings.Split(utils.StripANSI(raw), "\n") {
+		switch {
+		case strings.Contains(line, "Custom..."):
+			chipRow = line
+		case strings.Contains(line, "↑ ↓"):
+			tipsRow = line
+		}
+	}
+	if chipRow == "" || tipsRow == "" {
+		t.Fatalf("chips/tips rows not found:\n%s", utils.StripANSI(raw))
+	}
+	if strings.Contains(chipRow, "↑ ↓") {
+		t.Errorf("narrow panel kept chips and hints on one row: %q", chipRow)
+	}
+	if !strings.HasSuffix(tipsRow, "select ") {
+		t.Errorf("stacked hints not right-aligned: %q", tipsRow)
+	}
+}
+
+// TestPermissionPanelOpencodeHeader pins the opencode-aligned panel chrome:
+// a blank breathing row on top, the "△ Permission required" header with the
+// title in normal text, and the muted kind icon two columns deeper followed
+// by the title after one space.
+func TestPermissionPanelOpencodeHeader(t *testing.T) {
+	_, raw := openPermissionPanel(t, 190)
+	doc := utils.StripANSI(raw)
+	lines := strings.Split(doc, "\n")
+	if strings.Trim(lines[0], "┃ ") != "" {
+		t.Errorf("first panel row must be a blank breathing row: %q", lines[0])
+	}
+	if !strings.Contains(doc, "△ Permission required") {
+		t.Errorf("header must read \"△ Permission required\":\n%s", doc)
+	}
+	if !strings.Contains(doc, "    # agent-browser: agent_browser_check") {
+		t.Errorf("icon/title line must be inset four columns with a space after the kind icon:\n%s", doc)
+	}
+	for i, line := range lines {
+		if strings.Contains(line, "agent-browser: agent_browser_check") {
+			if i+1 >= len(lines) || strings.Trim(lines[i+1], "┃ ") != "" {
+				t.Errorf("title area needs a blank bottom margin row:\n%s", doc)
+			}
+			break
+		}
+	}
+}
+
+// TestPermissionPanelChipsBlendIntoStrip pins the opencode chip treatment:
+// unselected options carry the strip background (they melt into the strip,
+// no darker boxes) with one column of internal padding, the selection is
+// the warning color, and the whole panel uses a single warning hue — the
+// old two-yellow mix (#ffd60a) is gone.
+func TestPermissionPanelChipsBlendIntoStrip(t *testing.T) {
+	_, raw := openPermissionPanel(t, 190)
+	if strings.Contains(raw, "255;214;10") {
+		t.Errorf("panel still emits the #ffd60a yellow; warning must be theme.Warning only")
+	}
+	unselected := theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.TextAsh)
+	for _, name := range []string{" Allow always ", " Reject ", " Custom... "} {
+		if !strings.Contains(raw, unselected.Render(name)) {
+			t.Errorf("unselected chip %q is not strip-background padded", name)
+		}
+	}
+	selected := theme.BaseStyle().Background(theme.Warning).Foreground(theme.TextInk).Render(" Allow once ")
+	if !strings.Contains(raw, selected) {
+		t.Errorf("selected chip must be warning-filled with one column of padding")
+	}
+}
+
+// TestInterruptQueueDrainsOnPromptDone drives the interrupt-then-queue
+// cycle: while a turn is in flight, Enter queues the message instead of
+// firing a second prompt; when the cancelled turn lands (the ACP response
+// arrives with stop_reason cancelled → prompt_done), the queue head
+// auto-starts as the next turn.
+func TestInterruptQueueDrainsOnPromptDone(t *testing.T) {
+	m := newTestModel()
+	m.inChat = true
+	m.activeSessionID = "sess-1"
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m.loading = true
+	m.statusText = "Running..."
+
+	// Interrupt with empty input: esc rides the cancel path (the ACP call
+	// itself is a no-op without a wired session); input stays usable.
+	upd, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = upd.(*Model)
+
+	// The next message typed while the cancel is in flight must queue.
+	m.chatTextarea.SetValue("next round")
+	upd, _ = enterKey(m)
+	m = upd.(*Model)
+	if len(m.inputQueue) != 1 || m.inputQueue[0] != "next round" {
+		t.Fatalf("message must queue while cancelling, got %v", m.inputQueue)
+	}
+	if !strings.Contains(m.statusText, "Queued") {
+		t.Errorf("statusText = %q, want the Queued hint", m.statusText)
+	}
+
+	// The cancelled turn lands: prompt_done clears loading and the queue
+	// head auto-starts as the next turn.
+	upd, _ = m.Update(promptDoneMsg{})
+	m = upd.(*Model)
+	if len(m.inputQueue) != 0 {
+		t.Fatalf("queue must drain on prompt_done, got %v", m.inputQueue)
+	}
+	if !m.loading {
+		t.Error("drained next turn must re-arm loading")
+	}
+	if m.statusText != "Running..." {
+		t.Errorf("statusText = %q, want Running...", m.statusText)
+	}
+}
+
+// TestNewClearsPendingPermissionDialog pins the mute-page bug: /new with
+// a permission dialog pending (dispatched directly — keystrokes would be
+// intercepted) must answer it "cancelled" and close it, leaving input
+// alive on the fresh page (lazy first-prompt queue path).
+func TestNewClearsPendingPermissionDialog(t *testing.T) {
+	m := newTestModel()
+	m.acpSession = testAcpSession(t)
+	m.inChat = true
+	m.activeSessionID = "sess-1"
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	replyCh := make(chan openacp.RequestPermissionResponse, 1)
+	m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
+		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1", Title: "shell bun install"},
+		Options: []openacp.PermissionOption{
+			{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce},
+		},
+	}, replyCh: replyCh})
+	if m.permissionReq == nil {
+		t.Fatal("dialog did not open")
+	}
+
+	upd, _ := m.executeCommand(panelCommand{slash: "/new", action: actionNew})
+	m = upd.(*Model)
+	if m.permissionReq != nil {
+		t.Fatal("/new left the permission dialog pending — the page is mute")
+	}
+	select {
+	case resp := <-replyCh:
+		if resp.Outcome.Outcome != "cancelled" {
+			t.Errorf("abandoned dialog outcome = %q, want cancelled", resp.Outcome.Outcome)
+		}
+	default:
+		t.Fatal("abandoned dialog was never answered")
+	}
+
+	// Input must reach the lazy first-prompt path again.
+	m.chatTextarea.SetValue("hello")
+	m, _ = enterKey(m)
+	if len(m.inputQueue) != 1 || m.inputQueue[0] != "hello" {
+		t.Errorf("input dead after /new with pending dialog: queue=%v", m.inputQueue)
+	}
+}
+
+// TestPermissionRequestRacingResetAutoCancelled pins the user-reported
+// mute-page race: a tool's permission request was already in flight when
+// /new landed; it arrives on the fresh welcome page (no active session)
+// and must be auto-cancelled instead of opening a dialog that eats all
+// input.
+func TestPermissionRequestRacingResetAutoCancelled(t *testing.T) {
+	m := newTestModel()
+	m.acpSession = testAcpSession(t)
+	m.inChat = true
+	m.activeSessionID = "sess-1"
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m.loading = true // streaming
+
+	upd, _ := m.executeCommand(panelCommand{slash: "/new", action: actionNew})
+	m = upd.(*Model)
+	if m.activeSessionID != "" || m.loading {
+		t.Fatal("/new must reset to the sessionless welcome page")
+	}
+
+	replyCh := make(chan openacp.RequestPermissionResponse, 1)
+	up2, _ := m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
+		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1", Title: "mcp__agent-browser__agent_browser_check"},
+		Options: []openacp.PermissionOption{
+			{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce},
+		},
+	}, replyCh: replyCh})
+	m = up2.(*Model)
+	if m.permissionReq != nil {
+		t.Fatal("a request racing the reset must not open the dialog")
+	}
+	select {
+	case resp := <-replyCh:
+		if resp.Outcome.Outcome != "cancelled" {
+			t.Errorf("racing request outcome = %q, want cancelled", resp.Outcome.Outcome)
+		}
+	default:
+		t.Fatal("racing request was never answered")
+	}
+
+	// Input is alive: typing works and queues through the lazy path.
+	m.chatTextarea.SetValue("hello")
+	m, _ = enterKey(m)
+	if len(m.inputQueue) != 1 || m.inputQueue[0] != "hello" {
+		t.Errorf("input dead after racing dialog: queue=%v", m.inputQueue)
+	}
+}
+
+// TestNewWhileStreamingIgnoresStalePromptDone pins the stale-turn race:
+// the abandoned turn's prompt_done can land seconds after /new (tool
+// cancel grace); it must not reset the fresh generation's loading state
+// or drain its queue.
+func TestNewWhileStreamingIgnoresStalePromptDone(t *testing.T) {
+	m := newTestModel()
+	m.acpSession = testAcpSession(t)
+	m.inChat = true
+	m.activeSessionID = "sess-1"
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m.loading = true // streaming
+
+	m.chatTextarea.SetValue("/new")
+	m, _ = enterKey(m)
+	if m.turnEpoch != 1 {
+		t.Fatalf("/new must bump the turn epoch, got %d", m.turnEpoch)
+	}
+
+	// The user types the first message of the new session: lazy-queued
+	// while the new session is created.
+	m.chatTextarea.SetValue("hello")
+	m, _ = enterKey(m)
+	if len(m.inputQueue) != 1 {
+		t.Fatalf("new session's first message must queue, got %v", m.inputQueue)
+	}
+
+	// The abandoned turn's prompt_done lands late: ignored.
+	up2, _ := m.Update(promptDoneMsg{steps: 3, epoch: 0})
+	m = up2.(*Model)
+	if len(m.inputQueue) != 1 {
+		t.Fatalf("stale prompt_done drained the NEW turn's queue: %v", m.inputQueue)
+	}
+
+	// The fresh generation's bookkeeping still works.
+	up3, _ := m.Update(newSessionMsg{sessionID: "sess-2"})
+	m = up3.(*Model)
+	if len(m.inputQueue) != 0 {
+		t.Errorf("new session must drain the deferred prompt, got %v", m.inputQueue)
+	}
+	if !m.loading {
+		t.Error("drained prompt must keep loading on until prompt_done")
+	}
+}
+
+func TestModeBadgeCoversServerModes(t *testing.T) {
+	m := newTestModel()
+	cases := []struct {
+		mode  string
+		label string
+		col   color.Color
+	}{
+		{"auto", "Auto", theme.Primary},
+		{"semi-auto", "Semi-Auto", theme.Warning},
+		{"manual", "Manual", theme.Success},
+		{"plan", "Plan", theme.Notify},
+	}
+	for _, c := range cases {
+		m.mode = c.mode
+		label, col := m.modeBadge()
+		if label != c.label {
+			t.Errorf("mode %q badge = %q, want %q", c.mode, label, c.label)
+		}
+		if col != color.Color(c.col) {
+			t.Errorf("mode %q badge color = %v, want %v", c.mode, col, c.col)
+		}
+	}
+	// Unknown non-empty modes surface the raw value in normal text.
+	m.mode = "mystery"
+	if label, col := m.modeBadge(); label != "mystery" || col != color.Color(theme.TextNormal) {
+		t.Errorf("unknown mode badge = %q %v, want raw value in normal text", label, col)
+	}
+}
+
+func TestMcpIndicatorHiddenWithoutServers(t *testing.T) {
+	m := newTestModel()
+	m.inChat = false
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	lines := strings.Split(utils.StripANSI(m.View().Content), "\n")
+	// No MCP configured: the footer carries only workdir and version.
+	footer := lines[len(lines)-2]
+	if strings.Contains(footer, "MCP") || strings.Contains(footer, "⊙") {
+		t.Errorf("footer must hide the MCP segment, got %q", footer)
+	}
+}
+
+func TestMcpIndicatorShowsCountAndFailures(t *testing.T) {
+	m := newTestModel()
+	m.inChat = false
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m.SetConfiguredMcpServers([]openacp.McpServerStatus{
+		{Name: "agent-browser", Type: "stdio"},
+		{Name: "broken", Type: "stdio", Status: "failed"},
+	})
+	lines := strings.Split(utils.StripANSI(m.View().Content), "\n")
+	footer := lines[len(lines)-2]
+	for _, want := range []string{"⊙", "2 MCP", "/status"} {
+		if !strings.Contains(footer, want) {
+			t.Errorf("footer %q missing %q", footer, want)
+		}
+	}
+	// A live wire snapshot replaces the settings seed: one server now.
+	m.mcpServers = []openacp.McpServerStatus{{Name: "agent-browser", Status: "connected", Tools: 12}}
+	lines = strings.Split(utils.StripANSI(m.View().Content), "\n")
+	if !strings.Contains(lines[len(lines)-2], "1 MCP") {
+		t.Errorf("wire snapshot must take precedence, got %q", lines[len(lines)-2])
+	}
+}
+
+func TestStatusCommandOpensMcpPanel(t *testing.T) {
+	m := newTestModel()
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m.SetConfiguredMcpServers([]openacp.McpServerStatus{
+		{Name: "agent-browser", Type: "stdio", Status: "connected", Tools: 12},
+		{Name: "broken", Type: "stdio", Status: "failed"},
+	})
+	upd, _ := m.executeCommand(panelCommand{slash: "/status", action: actionStatus})
+	m = upd.(*Model)
+	if !m.panelOpen || m.panelMode != panelModeStatus {
+		t.Fatalf("/status did not open the status panel (open=%v mode=%v)", m.panelOpen, m.panelMode)
+	}
+	v := utils.StripANSI(m.View().Content)
+	for _, want := range []string{"MCP Status", "✓ agent-browser", "12 tools", "✗ broken", "connect failed"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("status panel missing %q", want)
+		}
+	}
+	// Any key dismisses it (help/export pattern).
+	upd, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = upd.(*Model)
+	if m.panelOpen {
+		t.Error("status panel must be dismiss-only")
 	}
 }
 
@@ -3333,11 +3931,17 @@ func TestVirtualLineHeightsMatchRenderedBlocks(t *testing.T) {
 	}
 
 	vpW := layout.GetTranscriptWidth(m.width)
+	// Style first so heights come from the cache (exact) — the settle pass
+	// guarantees this for the visible band; here the whole (tiny) doc fits
+	// the band.
+	for i, msg := range m.messages {
+		m.renderMessageBlock(i, msg, vpW)
+	}
 	heights := m.virtualLineHeights(vpW)
 
-	// Heights must equal the real rendered block heights: the virtual
-	// window cuts (or pads) a message's rows whenever they drift apart,
-	// which is how card bottom padding used to vanish.
+	// Styled messages' heights must equal the real rendered block heights:
+	// the virtual window cuts (or pads) a message's rows whenever they
+	// drift apart, which is how card bottom padding used to vanish.
 	for i, msg := range m.messages {
 		block, skip := m.renderMessageBlock(i, msg, vpW)
 		if skip {
@@ -3363,11 +3967,12 @@ func TestVirtualDocStylesOnlyVisibleWindow(t *testing.T) {
 	m.chatViewport.SetHeight(4) // window rows [0,4)
 	doc := m.renderVirtualDoc(4)
 
-	// Measuring the exact heights styles every message once (through the
-	// render cache); the windowing now lives in the ROWS: inside the window
-	// the doc carries the real block rows, everywhere else placeholders.
-	if len(m.renderCache) != 6 {
-		t.Fatalf("cache entries = %d, want 6 (height measurement styles all)", len(m.renderCache))
+	// Lazy heights: only the settled window band gets styled — off-window
+	// messages are estimates, so a long-session load styles the visible
+	// screen, not the whole transcript. Inside the window the doc carries
+	// the real block rows, everywhere else placeholders.
+	if len(m.renderCache) >= 6 {
+		t.Fatalf("cache entries = %d, want fewer than 6 (lazy heights style only the band)", len(m.renderCache))
 	}
 	lines := strings.Split(doc, "\n")
 	heights := m.virtualLineHeights(layout.GetTranscriptWidth(m.width))
@@ -4167,14 +4772,416 @@ func TestWindowTitle(t *testing.T) {
 	}
 }
 
-// TestViewMouseModeNone guards the text-selection fix: the TUI must not
-// enable bubbletea's CellMotion mouse mode. CellMotion emits \x1b[?1002h,
-// which forwards every button drag to the app and disables the terminal
-// emulator's native text selection. Mouse tracking is driven manually in
-// app.go as plain 1000h tracking (wheel/click still arrive, drags stay free
-// for box selection).
-func TestViewMouseModeNone(t *testing.T) {
-	if got := createView("hello").MouseMode; got != tea.MouseModeNone {
-		t.Errorf("MouseMode = %v, want MouseModeNone (manual 1000h tracking)", got)
+// TestViewMouseModeCellMotion guards the mouse-interaction design: the TUI
+// must run in bubbletea's CellMotion mode (1002h + SGR 1006) so clicks,
+// wheel, drags and motion all reach the app — the scrollbar drag and the
+// in-transcript box selection both need motion events. App-owned selection
+// replaces the terminal's native text selection; see app.go for the
+// trade-off notes.
+func TestViewMouseModeCellMotion(t *testing.T) {
+	if got := createView("hello").MouseMode; got != tea.MouseModeCellMotion {
+		t.Errorf("MouseMode = %v, want MouseModeCellMotion (scrollbar drag + box selection)", got)
+	}
+}
+
+// TestScrollbarDrag drives the drag state machine directly: a track click
+// jumps the thumb under the cursor, held-button motion maps cursor rows to
+// scroll offsets (even when the cursor strays off the bar column), and the
+// matching release ends the drag.
+func TestScrollbarDrag(t *testing.T) {
+	m := newTestModel()
+	for i := 0; i < 30; i++ {
+		m.messages = append(m.messages, ChatMessage{Role: "assistant", Content: "drag test line"})
+	}
+	m.inChat = true
+	m.width, m.height = 120, 24
+	m.syncViewport()
+	if total := m.chatViewport.TotalLineCount(); total <= m.chatViewport.Height() {
+		t.Fatalf("transcript must overflow the viewport: total=%d", total)
+	}
+	m.chatViewport.GotoBottom()
+	m.needAutoScroll = false
+	m.syncViewport()
+	if m.chatViewport.YOffset() == 0 {
+		t.Fatalf("expected a non-zero offset at the bottom")
+	}
+
+	// Track press above the thumb: jump so the cursor sits mid-thumb.
+	upd, _ := m.Update(tea.MouseClickMsg(tea.Mouse{X: m.scrollbarX(), Y: 2, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if !m.sbarDrag {
+		t.Fatalf("track press did not start a drag")
+	}
+	if got := m.chatViewport.YOffset(); got > 4 {
+		t.Fatalf("track click near the top jumped to offset %d, want ~0", got)
+	}
+	if m.needAutoScroll {
+		t.Fatalf("dragging away from the bottom must break auto-scroll")
+	}
+
+	// Held-button motion, cursor drifting off the bar column.
+	upd, _ = m.Update(tea.MouseMotionMsg(tea.Mouse{X: 3, Y: 16, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if got := m.chatViewport.YOffset(); got == 0 {
+		t.Fatalf("motion did not scroll")
+	}
+
+	upd, _ = m.Update(tea.MouseReleaseMsg(tea.Mouse{X: 3, Y: 16, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if m.sbarDrag {
+		t.Fatalf("release did not end the drag")
+	}
+}
+
+// TestScrollbarDragGuards checks the press paths that must NOT start a drag:
+// a miss off the bar column, a press below the viewport, and a short
+// document with no thumb.
+func TestScrollbarDragGuards(t *testing.T) {
+	m := newTestModel()
+	m.messages = []ChatMessage{{Role: "assistant", Content: "short"}}
+	m.inChat = true
+	m.width, m.height = 120, 24
+	m.syncViewport()
+
+	// Document fits: no drag even on the bar column.
+	upd, _ := m.Update(tea.MouseClickMsg(tea.Mouse{X: m.scrollbarX(), Y: 2, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if m.sbarDrag {
+		t.Fatalf("drag started on a document that fits")
+	}
+
+	for i := 0; i < 30; i++ {
+		m.messages = append(m.messages, ChatMessage{Role: "assistant", Content: "drag test line"})
+	}
+	m.syncViewport()
+	// Off-column press.
+	upd, _ = m.Update(tea.MouseClickMsg(tea.Mouse{X: m.scrollbarX() - 1, Y: 2, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if m.sbarDrag {
+		t.Fatalf("drag started off the bar column")
+	}
+	// Press below the track.
+	upd, _ = m.Update(tea.MouseClickMsg(tea.Mouse{X: m.scrollbarX(), Y: m.chatViewport.Height() + 3, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if m.sbarDrag {
+		t.Fatalf("drag started below the track")
+	}
+}
+
+// TestBoxSelection drives the selection state machine: press anchors, held
+// motion extends (the highlight renders and survives scrolling — document
+// coordinates), and release drops the box entirely: the copy rides OSC 52
+// and the toast replaces the highlight as feedback; the next press starts
+// over.
+func TestBoxSelection(t *testing.T) {
+	m := newTestModel()
+	for i := 0; i < 30; i++ {
+		m.messages = append(m.messages, ChatMessage{Role: "assistant", Content: "selection target line here"})
+	}
+	m.inChat = true
+	m.width, m.height = 120, 24
+	m.syncViewport()
+
+	// Press inside the transcript and drag right.
+	upd, _ := m.Update(tea.MouseClickMsg(tea.Mouse{X: 6, Y: 3, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if !m.selection.active {
+		t.Fatalf("press did not anchor a selection")
+	}
+	upd, _ = m.Update(tea.MouseMotionMsg(tea.Mouse{X: 20, Y: 4, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if !m.selectionSet() {
+		t.Fatalf("motion did not extend the selection")
+	}
+
+	// Mid-drag: the rendered viewport carries the selection background.
+	rendered := m.viewportView()
+	if !strings.Contains(rendered, "48;2;38;70;109m") {
+		t.Fatalf("selection background not rendered")
+	}
+
+	// Scrolling keeps the highlight glued to the text (doc coordinates).
+	yOff := m.chatViewport.YOffset()
+	m.chatViewport.ScrollUp(3)
+	m.needAutoScroll = false
+	m.syncViewport()
+	if m.chatViewport.YOffset() == yOff {
+		t.Fatalf("scroll did not move the window")
+	}
+	if !m.selectionSet() {
+		t.Fatalf("scroll cleared the selection")
+	}
+
+	// Release copies and drops the box — the toast is the feedback.
+	m.chatViewport.SetYOffset(yOff)
+	m.syncViewport()
+	upd, cmd := m.Update(tea.MouseReleaseMsg(tea.Mouse{X: 20, Y: 4, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if m.selection.active {
+		t.Fatalf("release did not end the selection drag")
+	}
+	if m.selectionSet() {
+		t.Fatalf("highlight must drop on release; the toast replaces it")
+	}
+	if cmd == nil {
+		t.Fatalf("release produced no copy command")
+	}
+	if m.notifyMsg != "Copied to clipboard" {
+		t.Errorf("copy toast = %q", m.notifyMsg)
+	}
+
+	// The next press starts a fresh (empty) selection.
+	upd, _ = m.Update(tea.MouseClickMsg(tea.Mouse{X: 4, Y: 2, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if m.selectionSet() {
+		t.Fatalf("press did not reset the previous selection")
+	}
+
+	// Copy text: box a known span of a known row and check the extracted
+	// text (read pre-release — the state is gone once the release lands).
+	m.chatViewport.SetYOffset(yOff)
+	m.syncViewport()
+	line := strings.Split(strings.Split(m.chatViewport.View(), "\n")[3], "\n")[0]
+	plain := utils.StripANSI(line)
+	if len(plain) < 20 {
+		t.Fatalf("unexpected short viewport row %q", plain)
+	}
+	upd, _ = m.Update(tea.MouseClickMsg(tea.Mouse{X: 6, Y: 3, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	upd, _ = m.Update(tea.MouseMotionMsg(tea.Mouse{X: 6 + 9, Y: 3, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if want := plain[5:15]; m.selectedText() != want {
+		t.Fatalf("selectedText = %q, want %q", m.selectedText(), want)
+	}
+	upd, cmd = m.Update(tea.MouseReleaseMsg(tea.Mouse{X: 6 + 9, Y: 3, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if cmd == nil {
+		t.Fatalf("release produced no copy command")
+	}
+	if m.selectionSet() || m.selection.active {
+		t.Fatalf("release must clear the box")
+	}
+}
+
+// TestSelectionClearsOnContentChange guards the stale-coordinates fix: any
+// transcript content change drops the selection, since its document rows
+// shift underneath.
+func TestSelectionClearsOnContentChange(t *testing.T) {
+	m := newTestModel()
+	m.messages = []ChatMessage{{Role: "assistant", Content: "hello"}}
+	m.inChat = true
+	m.width, m.height = 120, 24
+	m.syncViewport()
+	upd, _ := m.Update(tea.MouseClickMsg(tea.Mouse{X: 6, Y: 2, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	upd, _ = m.Update(tea.MouseMotionMsg(tea.Mouse{X: 12, Y: 2, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	if !m.selectionSet() {
+		t.Fatalf("selection not set")
+	}
+	// A drag in flight must survive content changes: streaming appends rows
+	// below the selection, so wiping the gesture mid-drag would make
+	// selection unusable while the agent replies.
+	upd, _ = m.markContentDirty()
+	m = upd.(*Model)
+	if !m.selection.active || !m.selectionSet() {
+		t.Fatalf("content change killed an in-flight drag")
+	}
+	// Once released, the highlight is transient: the next content change
+	// drops it.
+	upd, _ = m.Update(tea.MouseReleaseMsg(tea.Mouse{X: 12, Y: 2, Button: tea.MouseLeft}))
+	m = upd.(*Model)
+	upd, _ = m.markContentDirty()
+	m = upd.(*Model)
+	if m.selectionSet() || m.selection.active {
+		t.Fatalf("content change did not clear the released selection")
+	}
+}
+
+// TestPermissionCustomInput drives the "Custom..." free-text entry: it is
+// one past the server options in the ↑↓ order, enter swaps the chips for a
+// focused input line (placeholder naming the agent), typing goes to the
+// perm textarea, and a non-empty submit rides reject_once with the text as
+// feedback so the model reads the instruction. Esc returns to the chips
+// with the dialog still open; a fresh dialog starts clean.
+func TestPermissionCustomInput(t *testing.T) {
+	m := newTestModel()
+	m.activeSessionID = "sess-1" // no session → requests are auto-cancelled
+	replyCh := make(chan openacp.RequestPermissionResponse, 1)
+	m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
+		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1", Title: "shell bun install"},
+		Options: []openacp.PermissionOption{
+			{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce},
+			{OptionID: "allow_always", Name: "Allow always", Kind: openacp.PermissionAllowAlways},
+			{OptionID: "reject_once", Name: "Reject", Kind: openacp.PermissionRejectOnce},
+		},
+	}, replyCh: replyCh})
+
+	down := tea.KeyPressMsg{Code: tea.KeyDown}
+	enter := tea.KeyPressMsg{Code: tea.KeyEnter}
+	esc := tea.KeyPressMsg{Code: tea.KeyEscape}
+
+	// Chips render with the synthetic Custom... tail.
+	if doc := utils.StripANSI(m.renderPermissionPanel(m.getContentWidth()-1, 0)); !strings.Contains(doc, "Custom...") {
+		t.Fatalf("Custom chip missing from the dialog:\n%s", doc)
+	}
+
+	// Walk to the Custom chip and enter it.
+	for i := 0; i < 3; i++ {
+		m.Update(down)
+	}
+	if m.permissionSelectedIdx != 3 {
+		t.Fatalf("selection = %d, want 3 (the Custom chip)", m.permissionSelectedIdx)
+	}
+	m.Update(enter)
+	if !m.permInputMode {
+		t.Fatalf("enter on Custom did not open the input line")
+	}
+	panel := utils.StripANSI(m.renderPermissionPanel(m.getContentWidth()-1, 0))
+	if !strings.Contains(panel, "tell openagent what to do instead") {
+		t.Fatalf("input line placeholder missing:\n%s", panel)
+	}
+	if strings.Contains(panel, "Allow once") {
+		t.Fatalf("chips must be hidden in input mode:\n%s", panel)
+	}
+
+	// Esc returns to the chips, dialog still open.
+	m.Update(esc)
+	if m.permInputMode || m.permissionReq == nil {
+		t.Fatalf("esc from input mode must return to the chips, not close the dialog")
+	}
+
+	// Re-enter, type the instruction, submit.
+	m.Update(enter)
+	for _, r := range "run test instead" {
+		m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	m.Update(enter)
+
+	select {
+	case resp := <-replyCh:
+		if resp.Outcome.Outcome != openacp.PermissionOutcomeSelected {
+			t.Fatalf("outcome = %q, want selected", resp.Outcome.Outcome)
+		}
+		if resp.Outcome.OptionID == nil || *resp.Outcome.OptionID != "reject_once" {
+			t.Fatalf("optionId = %v, want reject_once", resp.Outcome.OptionID)
+		}
+		if got := resp.Outcome.Meta["feedback"]; got != "run test instead" {
+			t.Fatalf("feedback = %v, want the typed instruction", got)
+		}
+	default:
+		t.Fatalf("submit produced no response on the reply channel")
+	}
+	if m.permissionReq != nil || m.permInputMode {
+		t.Fatalf("dialog and input mode must reset after the submit")
+	}
+}
+
+// TestPermissionCustomInputEmptySubmit checks the guard: enter on an empty
+// (or whitespace) input stays in input mode and sends nothing.
+func TestPermissionCustomInputEmptySubmit(t *testing.T) {
+	m := newTestModel()
+	m.activeSessionID = "sess-1" // no session → requests are auto-cancelled
+	replyCh := make(chan openacp.RequestPermissionResponse, 1)
+	m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
+		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1"},
+		Options:  []openacp.PermissionOption{{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce}},
+	}, replyCh: replyCh})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyDown}) // → Custom chip
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.permInputMode {
+		t.Fatalf("input mode not entered")
+	}
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}) // empty submit
+	if !m.permInputMode || m.permissionReq == nil {
+		t.Fatalf("empty submit must keep the input open")
+	}
+	select {
+	case resp := <-replyCh:
+		t.Fatalf("empty submit sent a response: %+v", resp)
+	default:
+	}
+}
+
+// TestReplayBuffersUntilLoadCompletes pins the one-shot history load: while
+// replaying, streamed history messages are held (the transcript stays
+// empty); sessionLoadedMsg applies the whole buffer in arrival order and
+// marks the viewport dirty exactly once — the transcript appears fully
+// formed instead of trickling in message by message.
+func TestReplayBuffersUntilLoadCompletes(t *testing.T) {
+	m := newTestModel()
+	m.inChat = true
+	m.width, m.height = 120, 36
+	m.loading = true // session pick sets these before the load command fires
+	m.replaying = true
+	m.replayBuffering = true
+
+	m.Update(agentMessageMsg{text: "assistant one", createdAt: todayAt(10, 1)})
+	m.Update(toolCallMsg{id: "t1", title: "shell ls", status: toolDone, createdAt: todayAt(10, 2)})
+	m.Update(userMessageMsg{text: "second question", createdAt: todayAt(10, 3)})
+	m.Update(agentThoughtMsg{text: "thinking", createdAt: todayAt(10, 4)})
+
+	if len(m.replayBuf) != 4 {
+		t.Fatalf("replayBuf = %d items, want 4", len(m.replayBuf))
+	}
+	if len(m.messages) != 0 {
+		t.Fatalf("replayed messages must not land while buffering, got %d", len(m.messages))
+	}
+	if !m.loading {
+		t.Fatalf("loading indicator stays up during the replay")
+	}
+
+	upd, _ := m.Update(sessionLoadedMsg{sessionID: "s1", title: "T"})
+	m = upd.(*Model)
+	if len(m.replayBuf) != 0 {
+		t.Fatalf("buffer must be drained after the load")
+	}
+	if m.replaying || m.loading {
+		t.Fatalf("replay/loading flags must clear, got %v/%v", m.replaying, m.loading)
+	}
+	// The outer Update already consumed the single dirty mark (one refeed);
+	// syncViewport mirrors it so the whole transcript is inspectable.
+	m.syncViewport()
+	doc := utils.StripANSI(m.renderVirtualDoc(30))
+	// The thought message renders as its collapsed "+ Thought" card header
+	// (content stays hidden unless thinking is expanded) — same as live.
+	for _, want := range []string{"assistant one", "shell ls", "second question", "+ Thought"} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("transcript missing %q after the one-pass load:\n%s", want, doc)
+		}
+	}
+	// Arrival order preserved: user, tool, assistant, thought interleaved as
+	// sent (assistant one → tool → user → thought).
+	roles := []string{}
+	for _, msg := range m.messages {
+		roles = append(roles, msg.Role)
+	}
+	want := []string{"assistant", "tool", "user", "thought"}
+	if len(roles) != len(want) {
+		t.Fatalf("messages = %v, want %v", roles, want)
+	}
+	for i := range want {
+		if roles[i] != want[i] {
+			t.Fatalf("message %d role = %q, want %q (all: %v)", i, roles[i], want[i], roles)
+		}
+	}
+}
+
+// TestReplayBufferAppliedOnLoadError keeps the legacy behavior on a failed
+// load: whatever streamed in before the error stays in the transcript.
+func TestReplayBufferAppliedOnLoadError(t *testing.T) {
+	m := newTestModel()
+	m.inChat = true
+	m.width, m.height = 120, 36
+	m.replaying = true
+	m.Update(userMessageMsg{text: "half loaded", createdAt: todayAt(10, 0)})
+
+	upd, _ := m.Update(sessionLoadedMsg{err: fmt.Errorf("boom")})
+	m = upd.(*Model)
+	if len(m.messages) != 1 || m.messages[0].Content != "half loaded" {
+		t.Fatalf("buffered messages must survive a failed load, got %+v", m.messages)
+	}
+	if m.replayBuf != nil {
+		t.Fatalf("buffer must drain on the error path too")
 	}
 }
