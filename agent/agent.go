@@ -38,9 +38,9 @@ type Agent struct {
 	OutGuard governance.OutputGuard  // nil = no output guard
 
 	// Configuration
-	MaxTurns            int // max loop iterations, 0 = default (500)
-	MaxWorkingTokens    int // max tokens for working set before compaction; 0 = 70% of model context window
-	MaxCompressedTokens int // max tokens for compressed summary, 0 = no limit (default 8192)
+	MaxTurns            int // max loop iterations; 0 = fallback to 500 (New sets 500).
+	MaxWorkingTokens    int // max tokens for working set before compaction; 0 = 70% of model context window, or 20000 if unknown
+	MaxCompressedTokens int // max tokens for compressed summary; 0 = no limit. New sets 8192.
 
 	// CompactRatio is the fraction of the working-set budget to COMPRESS away
 	// when auto-compaction triggers (0–1). 0.8 (default) means: when the
@@ -83,7 +83,7 @@ type SubAgent struct {
 	Tools []string
 	// Model overrides the parent model (nil = inherit).
 	Model openagent.Model
-	// MaxTurns caps the sub-agent loop; 0 = default (3).
+	// MaxTurns caps the sub-agent loop; 0 = fallback to 30.
 	MaxTurns int
 }
 

@@ -34,7 +34,7 @@ func (rt *Runtime) run(ctx context.Context, session openagent.Session, prefix []
 	cfgModel := rt.cfg.Model
 	rt.mu.RUnlock()
 	if maxTurns <= 0 {
-		maxTurns = 20 // agent.New's default; guard for zero-value configs
+		maxTurns = 500 // matches agent.New's default; guard for zero-value configs
 	}
 
 	// Resolve model for this run (Model() reads it under the same lock).
