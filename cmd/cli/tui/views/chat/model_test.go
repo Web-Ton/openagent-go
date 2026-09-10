@@ -315,6 +315,7 @@ func TestCtrlCQuitArmExpires(t *testing.T) {
 // unanswered; the second press quits.
 func TestCtrlCQuitGatedOverPermissionDialog(t *testing.T) {
 	m := newTestModel()
+	m.activeSessionID = "sess-1" // no session → requests are auto-cancelled
 	replyCh := make(chan openacp.RequestPermissionResponse, 1)
 	m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
 		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1"},
@@ -1572,11 +1573,16 @@ func TestTurnEndMarkerLegacyRowsHidden(t *testing.T) {
 		{Role: "assistant", Content: "a1", TurnId: 1},
 	}
 	vpW := layout.GetTranscriptWidth(m.width)
+	// Style first so the heights come from the render cache (exact) —
+	// unstyled messages are estimated, not measured.
+	for i, msg := range m.messages {
+		m.renderMessageBlock(i, msg, vpW)
+	}
+	heights := m.virtualLineHeights(vpW)
 	for i, msg := range m.messages {
 		if m.isTurnEndAt(i, msg) {
 			t.Errorf("legacy row %d must not be a turn-end carrier", i)
 		}
-		heights := m.virtualLineHeights(vpW)
 		block, skip := m.renderMessageBlock(i, msg, vpW)
 		if skip {
 			continue
@@ -2180,6 +2186,7 @@ func TestRetryingRowLifecycle(t *testing.T) {
 // panel itself shows the call), and comes back once the dialog resolves.
 func TestPendingToolHiddenWhilePermissionOpen(t *testing.T) {
 	m := newTestModel()
+	m.activeSessionID = "sess-1" // no session → requests are auto-cancelled
 	m.width, m.height = 100, 40
 	m.inChat = true
 	m.messages = []ChatMessage{
@@ -2800,6 +2807,289 @@ func TestConfigSetMsgReturnsNotifyCmd(t *testing.T) {
 	}
 }
 
+func TestPermissionDisplayTitleMcp(t *testing.T) {
+	cases := map[string]string{
+		"mcp__agent-browser__agent_browser_check": "agent-browser: agent_browser_check",
+		"shell bun install":                       "shell bun install",
+		"mcp__lonely":                             "mcp__lonely",
+	}
+	for in, want := range cases {
+		if got := permissionDisplayTitle(in); got != want {
+			t.Errorf("permissionDisplayTitle(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// openPermissionPanel builds a model with a pending permission request at
+// the given terminal size and returns it along with the panel's raw (ANSI
+// intact) rendering at the width View() uses.
+func openPermissionPanel(t *testing.T, termW int) (*Model, string) {
+	t.Helper()
+	m := newTestModel()
+	m.activeSessionID = "sess-1" // no session → requests are auto-cancelled
+	m.Update(tea.WindowSizeMsg{Width: termW, Height: 36})
+	replyCh := make(chan openacp.RequestPermissionResponse, 1)
+	m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
+		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1", Title: "mcp__agent-browser__agent_browser_check"},
+		Options: []openacp.PermissionOption{
+			{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce},
+			{OptionID: "allow_always", Name: "Allow always", Kind: openacp.PermissionAllowAlways},
+			{OptionID: "reject_once", Name: "Reject", Kind: openacp.PermissionRejectOnce},
+		},
+	}, replyCh: replyCh})
+	w := m.getContentWidth() - 1
+	return m, m.renderPermissionPanel(w, 0)
+}
+
+// TestPermissionPanelTipsRightAligned pins the strip layout: chips on the
+// left, key hints right-aligned at the panel's far edge (opencode's
+// layout), and MCP titles read as "server: tool", not wire noise.
+func TestPermissionPanelTipsRightAligned(t *testing.T) {
+	m, raw := openPermissionPanel(t, 190)
+	doc := utils.StripANSI(raw)
+	if !strings.Contains(doc, "agent-browser: agent_browser_check") {
+		t.Errorf("mcp title not prettified:\n%s", doc)
+	}
+	w := m.getContentWidth() - 1
+	for _, line := range strings.Split(doc, "\n") {
+		if !strings.Contains(line, "↑ ↓") {
+			continue
+		}
+		if !strings.HasSuffix(line, "select ") {
+			t.Errorf("tips not right-aligned (one trail column expected): %q", line)
+		}
+		if got := utils.DisplayWidth(line); got != w {
+			t.Errorf("strip row width = %d, want %d: %q", got, w, line)
+		}
+		return
+	}
+	t.Fatalf("chips/tips row not found:\n%s", doc)
+}
+
+// TestPermissionPanelRowsFilledToWidth guards the black-patch regression:
+// every panel row spans the full content box AND its tail carries the row
+// background — lipgloss pads fitting blocks with plain spaces, so a row
+// that relies on the outer Width() for its background ends in unstyled
+// (transparent) columns right after the text.
+func TestPermissionPanelRowsFilledToWidth(t *testing.T) {
+	m, raw := openPermissionPanel(t, 190)
+	w := m.getContentWidth() - 1
+	bgSeq, _, _ := strings.Cut(theme.BaseStyle().Background(theme.BgPanel).Render(" "), " ")
+	for i, line := range strings.Split(raw, "\n") {
+		if got := utils.DisplayWidth(line); got != w {
+			t.Errorf("row %d width = %d, want %d (overflow word-wraps the panel): %q", i, got, w, utils.StripANSI(line))
+		}
+		if title := strings.Index(line, "Permission required"); title >= 0 {
+			if tail := line[title+len("Permission required"):]; !strings.Contains(tail, bgSeq) {
+				t.Errorf("header row tail has no panel-background fill:\n%q", line)
+			}
+		}
+	}
+}
+
+// TestPermissionPanelNarrowStacksTips covers the narrow terminal: when
+// chips and hints cannot share a row, the hints drop to their own
+// right-aligned strip row instead of wrapping mid-hint.
+func TestPermissionPanelNarrowStacksTips(t *testing.T) {
+	_, raw := openPermissionPanel(t, 80)
+	var chipRow, tipsRow string
+	for _, line := range strings.Split(utils.StripANSI(raw), "\n") {
+		switch {
+		case strings.Contains(line, "Custom..."):
+			chipRow = line
+		case strings.Contains(line, "↑ ↓"):
+			tipsRow = line
+		}
+	}
+	if chipRow == "" || tipsRow == "" {
+		t.Fatalf("chips/tips rows not found:\n%s", utils.StripANSI(raw))
+	}
+	if strings.Contains(chipRow, "↑ ↓") {
+		t.Errorf("narrow panel kept chips and hints on one row: %q", chipRow)
+	}
+	if !strings.HasSuffix(tipsRow, "select ") {
+		t.Errorf("stacked hints not right-aligned: %q", tipsRow)
+	}
+}
+
+// TestInterruptQueueDrainsOnPromptDone drives the interrupt-then-queue
+// cycle: while a turn is in flight, Enter queues the message instead of
+// firing a second prompt; when the cancelled turn lands (the ACP response
+// arrives with stop_reason cancelled → prompt_done), the queue head
+// auto-starts as the next turn.
+func TestInterruptQueueDrainsOnPromptDone(t *testing.T) {
+	m := newTestModel()
+	m.inChat = true
+	m.activeSessionID = "sess-1"
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m.loading = true
+	m.statusText = "Running..."
+
+	// Interrupt with empty input: esc rides the cancel path (the ACP call
+	// itself is a no-op without a wired session); input stays usable.
+	upd, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = upd.(*Model)
+
+	// The next message typed while the cancel is in flight must queue.
+	m.chatTextarea.SetValue("next round")
+	upd, _ = enterKey(m)
+	m = upd.(*Model)
+	if len(m.inputQueue) != 1 || m.inputQueue[0] != "next round" {
+		t.Fatalf("message must queue while cancelling, got %v", m.inputQueue)
+	}
+	if !strings.Contains(m.statusText, "Queued") {
+		t.Errorf("statusText = %q, want the Queued hint", m.statusText)
+	}
+
+	// The cancelled turn lands: prompt_done clears loading and the queue
+	// head auto-starts as the next turn.
+	upd, _ = m.Update(promptDoneMsg{})
+	m = upd.(*Model)
+	if len(m.inputQueue) != 0 {
+		t.Fatalf("queue must drain on prompt_done, got %v", m.inputQueue)
+	}
+	if !m.loading {
+		t.Error("drained next turn must re-arm loading")
+	}
+	if m.statusText != "Running..." {
+		t.Errorf("statusText = %q, want Running...", m.statusText)
+	}
+}
+
+// TestNewClearsPendingPermissionDialog pins the mute-page bug: /new with
+// a permission dialog pending (dispatched directly — keystrokes would be
+// intercepted) must answer it "cancelled" and close it, leaving input
+// alive on the fresh page (lazy first-prompt queue path).
+func TestNewClearsPendingPermissionDialog(t *testing.T) {
+	m := newTestModel()
+	m.acpSession = testAcpSession(t)
+	m.inChat = true
+	m.activeSessionID = "sess-1"
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	replyCh := make(chan openacp.RequestPermissionResponse, 1)
+	m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
+		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1", Title: "shell bun install"},
+		Options: []openacp.PermissionOption{
+			{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce},
+		},
+	}, replyCh: replyCh})
+	if m.permissionReq == nil {
+		t.Fatal("dialog did not open")
+	}
+
+	upd, _ := m.executeCommand(panelCommand{slash: "/new", action: actionNew})
+	m = upd.(*Model)
+	if m.permissionReq != nil {
+		t.Fatal("/new left the permission dialog pending — the page is mute")
+	}
+	select {
+	case resp := <-replyCh:
+		if resp.Outcome.Outcome != "cancelled" {
+			t.Errorf("abandoned dialog outcome = %q, want cancelled", resp.Outcome.Outcome)
+		}
+	default:
+		t.Fatal("abandoned dialog was never answered")
+	}
+
+	// Input must reach the lazy first-prompt path again.
+	m.chatTextarea.SetValue("hello")
+	m, _ = enterKey(m)
+	if len(m.inputQueue) != 1 || m.inputQueue[0] != "hello" {
+		t.Errorf("input dead after /new with pending dialog: queue=%v", m.inputQueue)
+	}
+}
+
+// TestPermissionRequestRacingResetAutoCancelled pins the user-reported
+// mute-page race: a tool's permission request was already in flight when
+// /new landed; it arrives on the fresh welcome page (no active session)
+// and must be auto-cancelled instead of opening a dialog that eats all
+// input.
+func TestPermissionRequestRacingResetAutoCancelled(t *testing.T) {
+	m := newTestModel()
+	m.acpSession = testAcpSession(t)
+	m.inChat = true
+	m.activeSessionID = "sess-1"
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m.loading = true // streaming
+
+	upd, _ := m.executeCommand(panelCommand{slash: "/new", action: actionNew})
+	m = upd.(*Model)
+	if m.activeSessionID != "" || m.loading {
+		t.Fatal("/new must reset to the sessionless welcome page")
+	}
+
+	replyCh := make(chan openacp.RequestPermissionResponse, 1)
+	up2, _ := m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
+		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1", Title: "mcp__agent-browser__agent_browser_check"},
+		Options: []openacp.PermissionOption{
+			{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce},
+		},
+	}, replyCh: replyCh})
+	m = up2.(*Model)
+	if m.permissionReq != nil {
+		t.Fatal("a request racing the reset must not open the dialog")
+	}
+	select {
+	case resp := <-replyCh:
+		if resp.Outcome.Outcome != "cancelled" {
+			t.Errorf("racing request outcome = %q, want cancelled", resp.Outcome.Outcome)
+		}
+	default:
+		t.Fatal("racing request was never answered")
+	}
+
+	// Input is alive: typing works and queues through the lazy path.
+	m.chatTextarea.SetValue("hello")
+	m, _ = enterKey(m)
+	if len(m.inputQueue) != 1 || m.inputQueue[0] != "hello" {
+		t.Errorf("input dead after racing dialog: queue=%v", m.inputQueue)
+	}
+}
+
+// TestNewWhileStreamingIgnoresStalePromptDone pins the stale-turn race:
+// the abandoned turn's prompt_done can land seconds after /new (tool
+// cancel grace); it must not reset the fresh generation's loading state
+// or drain its queue.
+func TestNewWhileStreamingIgnoresStalePromptDone(t *testing.T) {
+	m := newTestModel()
+	m.acpSession = testAcpSession(t)
+	m.inChat = true
+	m.activeSessionID = "sess-1"
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m.loading = true // streaming
+
+	m.chatTextarea.SetValue("/new")
+	m, _ = enterKey(m)
+	if m.turnEpoch != 1 {
+		t.Fatalf("/new must bump the turn epoch, got %d", m.turnEpoch)
+	}
+
+	// The user types the first message of the new session: lazy-queued
+	// while the new session is created.
+	m.chatTextarea.SetValue("hello")
+	m, _ = enterKey(m)
+	if len(m.inputQueue) != 1 {
+		t.Fatalf("new session's first message must queue, got %v", m.inputQueue)
+	}
+
+	// The abandoned turn's prompt_done lands late: ignored.
+	up2, _ := m.Update(promptDoneMsg{steps: 3, epoch: 0})
+	m = up2.(*Model)
+	if len(m.inputQueue) != 1 {
+		t.Fatalf("stale prompt_done drained the NEW turn's queue: %v", m.inputQueue)
+	}
+
+	// The fresh generation's bookkeeping still works.
+	up3, _ := m.Update(newSessionMsg{sessionID: "sess-2"})
+	m = up3.(*Model)
+	if len(m.inputQueue) != 0 {
+		t.Errorf("new session must drain the deferred prompt, got %v", m.inputQueue)
+	}
+	if !m.loading {
+		t.Error("drained prompt must keep loading on until prompt_done")
+	}
+}
+
 func TestModeBadgeCoversServerModes(t *testing.T) {
 	m := newTestModel()
 	cases := []struct {
@@ -2826,6 +3116,67 @@ func TestModeBadgeCoversServerModes(t *testing.T) {
 	m.mode = "mystery"
 	if label, col := m.modeBadge(); label != "mystery" || col != color.Color(theme.TextNormal) {
 		t.Errorf("unknown mode badge = %q %v, want raw value in normal text", label, col)
+	}
+}
+
+func TestMcpIndicatorHiddenWithoutServers(t *testing.T) {
+	m := newTestModel()
+	m.inChat = false
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	lines := strings.Split(utils.StripANSI(m.View().Content), "\n")
+	// No MCP configured: the footer carries only workdir and version.
+	footer := lines[len(lines)-2]
+	if strings.Contains(footer, "MCP") || strings.Contains(footer, "⊙") {
+		t.Errorf("footer must hide the MCP segment, got %q", footer)
+	}
+}
+
+func TestMcpIndicatorShowsCountAndFailures(t *testing.T) {
+	m := newTestModel()
+	m.inChat = false
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m.SetConfiguredMcpServers([]openacp.McpServerStatus{
+		{Name: "agent-browser", Type: "stdio"},
+		{Name: "broken", Type: "stdio", Status: "failed"},
+	})
+	lines := strings.Split(utils.StripANSI(m.View().Content), "\n")
+	footer := lines[len(lines)-2]
+	for _, want := range []string{"⊙", "2 MCP", "/status"} {
+		if !strings.Contains(footer, want) {
+			t.Errorf("footer %q missing %q", footer, want)
+		}
+	}
+	// A live wire snapshot replaces the settings seed: one server now.
+	m.mcpServers = []openacp.McpServerStatus{{Name: "agent-browser", Status: "connected", Tools: 12}}
+	lines = strings.Split(utils.StripANSI(m.View().Content), "\n")
+	if !strings.Contains(lines[len(lines)-2], "1 MCP") {
+		t.Errorf("wire snapshot must take precedence, got %q", lines[len(lines)-2])
+	}
+}
+
+func TestStatusCommandOpensMcpPanel(t *testing.T) {
+	m := newTestModel()
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 36})
+	m.SetConfiguredMcpServers([]openacp.McpServerStatus{
+		{Name: "agent-browser", Type: "stdio", Status: "connected", Tools: 12},
+		{Name: "broken", Type: "stdio", Status: "failed"},
+	})
+	upd, _ := m.executeCommand(panelCommand{slash: "/status", action: actionStatus})
+	m = upd.(*Model)
+	if !m.panelOpen || m.panelMode != panelModeStatus {
+		t.Fatalf("/status did not open the status panel (open=%v mode=%v)", m.panelOpen, m.panelMode)
+	}
+	v := utils.StripANSI(m.View().Content)
+	for _, want := range []string{"MCP Status", "✓ agent-browser", "12 tools", "✗ broken", "connect failed"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("status panel missing %q", want)
+		}
+	}
+	// Any key dismisses it (help/export pattern).
+	upd, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = upd.(*Model)
+	if m.panelOpen {
+		t.Error("status panel must be dismiss-only")
 	}
 }
 
@@ -3531,11 +3882,17 @@ func TestVirtualLineHeightsMatchRenderedBlocks(t *testing.T) {
 	}
 
 	vpW := layout.GetTranscriptWidth(m.width)
+	// Style first so heights come from the cache (exact) — the settle pass
+	// guarantees this for the visible band; here the whole (tiny) doc fits
+	// the band.
+	for i, msg := range m.messages {
+		m.renderMessageBlock(i, msg, vpW)
+	}
 	heights := m.virtualLineHeights(vpW)
 
-	// Heights must equal the real rendered block heights: the virtual
-	// window cuts (or pads) a message's rows whenever they drift apart,
-	// which is how card bottom padding used to vanish.
+	// Styled messages' heights must equal the real rendered block heights:
+	// the virtual window cuts (or pads) a message's rows whenever they
+	// drift apart, which is how card bottom padding used to vanish.
 	for i, msg := range m.messages {
 		block, skip := m.renderMessageBlock(i, msg, vpW)
 		if skip {
@@ -3561,11 +3918,12 @@ func TestVirtualDocStylesOnlyVisibleWindow(t *testing.T) {
 	m.chatViewport.SetHeight(4) // window rows [0,4)
 	doc := m.renderVirtualDoc(4)
 
-	// Measuring the exact heights styles every message once (through the
-	// render cache); the windowing now lives in the ROWS: inside the window
-	// the doc carries the real block rows, everywhere else placeholders.
-	if len(m.renderCache) != 6 {
-		t.Fatalf("cache entries = %d, want 6 (height measurement styles all)", len(m.renderCache))
+	// Lazy heights: only the settled window band gets styled — off-window
+	// messages are estimates, so a long-session load styles the visible
+	// screen, not the whole transcript. Inside the window the doc carries
+	// the real block rows, everywhere else placeholders.
+	if len(m.renderCache) >= 6 {
+		t.Fatalf("cache entries = %d, want fewer than 6 (lazy heights style only the band)", len(m.renderCache))
 	}
 	lines := strings.Split(doc, "\n")
 	heights := m.virtualLineHeights(layout.GetTranscriptWidth(m.width))
@@ -4599,6 +4957,7 @@ func TestSelectionClearsOnContentChange(t *testing.T) {
 // with the dialog still open; a fresh dialog starts clean.
 func TestPermissionCustomInput(t *testing.T) {
 	m := newTestModel()
+	m.activeSessionID = "sess-1" // no session → requests are auto-cancelled
 	replyCh := make(chan openacp.RequestPermissionResponse, 1)
 	m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
 		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1", Title: "shell bun install"},
@@ -4673,6 +5032,7 @@ func TestPermissionCustomInput(t *testing.T) {
 // (or whitespace) input stays in input mode and sends nothing.
 func TestPermissionCustomInputEmptySubmit(t *testing.T) {
 	m := newTestModel()
+	m.activeSessionID = "sess-1" // no session → requests are auto-cancelled
 	replyCh := make(chan openacp.RequestPermissionResponse, 1)
 	m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
 		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1"},

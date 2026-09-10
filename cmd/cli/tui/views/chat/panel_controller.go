@@ -11,8 +11,8 @@ import (
 // panel state lives on the model; this method exists so the panel's key
 // handling is kept out of the main Update switch, which is already large.
 func (m *Model) handlePanelKey(k tea.KeyPressMsg) (cmd tea.Cmd, handled bool) {
-	// Help and export panels are dismiss-only: any key closes them.
-	if m.panelMode == panelModeHelp || m.panelMode == panelModeExport {
+	// Help, export and status panels are dismiss-only: any key closes them.
+	if m.panelMode == panelModeHelp || m.panelMode == panelModeExport || m.panelMode == panelModeStatus {
 		m.panelOpen = false
 		return nil, true
 	}

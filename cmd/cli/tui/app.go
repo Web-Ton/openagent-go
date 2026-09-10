@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"os"
+	"sort"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
@@ -55,6 +56,15 @@ func StartInteractiveTUI(ctx context.Context, cfg config.Config) error {
 	workDir, _ := os.Getwd()
 
 	model := chat.NewModel(ctx, cancel, workDir, ver, tuiCfg.Mode, tuiCfg.Colors.LogoColor, tuiCfg.LogoGradient)
+	// Seed the welcome footer's MCP indicator from settings; the wire
+	// mcp_servers_update (session create/load) replaces it with live
+	// connect outcomes. Sorted for a stable display order.
+	configured := make([]openacp.McpServerStatus, 0, len(cfg.McpServers))
+	for name, mc := range cfg.McpServers {
+		configured = append(configured, openacp.McpServerStatus{Name: name, Type: mc.Type})
+	}
+	sort.Slice(configured, func(i, j int) bool { return configured[i].Name < configured[j].Name })
+	model.SetConfiguredMcpServers(configured)
 	// Force truecolor: the TUI theme is 24-bit hex, and bubbletea's default
 	// colorprofile.Detect can resolve to NoTTY/ASCII on some PTYs (e.g. a
 	// headless/terminal-use emulator), which makes the renderer strip every

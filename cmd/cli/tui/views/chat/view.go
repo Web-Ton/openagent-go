@@ -70,6 +70,8 @@ func (m *Model) View() tea.View {
 			panel = m.renderHelpPanel()
 		case panelModeExport:
 			panel = m.renderExportPanel()
+		case panelModeStatus:
+			panel = m.renderMcpStatusPanel()
 		case panelModeSearch:
 			panel = m.renderSearchPanel()
 		case panelModeEdit:
@@ -619,36 +621,46 @@ func (m *Model) renderScrollbar(height int) string {
 func (m *Model) renderPermissionPanel(width, _ int) string {
 	req := m.permissionReq
 	tc := req.ToolCall
-	title := tc.Title
+	title := permissionDisplayTitle(tc.Title)
 	if title == "" {
 		title = "Tool Call"
 	}
 
 	panel := theme.BaseStyle().Background(theme.BgPanel)
+	strip := theme.BaseStyle().Background(theme.BgSurface)
 	yellow := lipgloss.Color("#ffd60a")
 	warn := theme.BaseStyle().Background(theme.BgPanel).Foreground(yellow)
 	muted := panel.Foreground(theme.TextAsh)
 
-	header := lipgloss.JoinVertical(lipgloss.Left,
-		panel.Render(lipgloss.JoinHorizontal(lipgloss.Left,
-			warn.Render("⚠"),
-			panel.Foreground(theme.TextNormal).Render(" Permission required"),
-		)),
-		muted.Render("  "+permissionKindIcon(tc.Kind)+title),
+	// Every row is filled out to the content box (width-1 — the left
+	// border takes the last column) with its own background, explicitly.
+	// Leaving the fill to the outer Width() styles nothing: lipgloss pads
+	// an already-fitting block with plain spaces, and each row's inner
+	// spans end in a reset the background never crosses — the row tail
+	// dissolves into a black patch right after the text.
+	rowW := width - 1
+	fill := func(bg lipgloss.Style, line string) string {
+		return bg.Render(line) + bg.Render(strings.Repeat(" ", max(0, rowW-utils.DisplayWidth(line))))
+	}
+
+	headerTitle := lipgloss.JoinHorizontal(lipgloss.Left,
+		warn.Render("⚠"),
+		panel.Foreground(theme.TextNormal).Render(" Permission required"),
 	)
 
 	// Body detail: what is actually being approved, per opencode — the
 	// shell command ("$ cmd") or the path in question ("- path") under a
 	// muted label. Skipped when the raw input carries neither.
-	var parts []string
-	parts = append(parts, header)
+	parts := []string{
+		fill(panel, headerTitle),
+		fill(panel, muted.Render("  "+permissionKindIcon(tc.Kind)+title)),
+	}
 	if label, lines, ok := permissionDetail(tc.RawInput, width-6); ok {
-		parts = append(parts, "", muted.Render("   "+label))
+		parts = append(parts, fill(panel, ""), fill(panel, muted.Render("   "+label)))
 		for _, ln := range lines {
-			parts = append(parts, panel.Foreground(theme.TextNormal).Render("   "+ln))
+			parts = append(parts, fill(panel, panel.Foreground(theme.TextNormal).Render("   "+ln)))
 		}
 	}
-
 	chipParts := make([]string, 0, len(req.Options)*2+2)
 	for i, opt := range req.Options {
 		name := opt.Name
@@ -680,7 +692,6 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 	}
 	chips := lipgloss.JoinHorizontal(lipgloss.Left, chipParts...)
 
-	strip := theme.BaseStyle().Background(theme.BgSurface)
 	if m.permInputMode {
 		// Free-text mode: the chips swap for a one-line input on the same
 		// surface strip, hints below (enter sends, esc returns to chips).
@@ -688,43 +699,43 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 			components.RenderCommandTipOn("enter", "send", theme.BgSurface),
 			components.RenderCommandTipOn("esc", "back", theme.BgSurface),
 		)
-		taW := permInputWidth(m.getContentWidth())
-		pad := max(0, (width-1)-2-taW)
-		inputLine := strip.Render(" " + m.permTextarea.View() + strings.Repeat(" ", pad))
-		tipLead := max(0, (width-1)-utils.DisplayWidth(tips)-1)
-		tipsLine := strip.Render(strings.Repeat(" ", tipLead)) + tips + strip.Render(" ")
-		parts = append(parts, "", inputLine, tipsLine)
+		inputText := " " + m.permTextarea.View()
+		tipsLine := strip.Render(strings.Repeat(" ", max(0, rowW-utils.DisplayWidth(tips)-1))) + tips + strip.Render(" ")
+		parts = append(parts, fill(panel, ""), fill(strip, inputText), fill(strip, tipsLine))
 	} else {
 		tips := lipgloss.JoinHorizontal(lipgloss.Right,
 			components.RenderCommandTipOn("↑ ↓", "switch", theme.BgSurface),
 			components.RenderCommandTipOn("esc", "cancel", theme.BgSurface),
 			components.RenderCommandTipOn("enter", "select", theme.BgSurface),
 		)
-		// Every span of the strip carries the surface background explicitly:
-		// plain spaces between styled segments sit behind an inner ANSI reset,
-		// where the outer style's background never reaches (a black hole in
-		// the middle of the strip). The strip spans the panel edge to edge,
-		// with a full-width blank strip row above and below the chips.
+		// Chips on the left, key hints right-aligned on the same surface
+		// strip (opencode's layout), spanning the panel edge to edge. The
+		// strip's blank breathing rows above and below must be width-1,
+		// not width: with the left border, lipgloss squeezes the content
+		// box to Width-1 and word-wraps a whitespace-only line one column
+		// over into nothing — the surface background collapses with it
+		// (the empty style-on-nothing span).
+		blankStrip := strip.Render(strings.Repeat(" ", rowW))
 		lead, trail := 2, 1
-		mid := width - utils.DisplayWidth(chips) - utils.DisplayWidth(tips) - lead - trail
-		if mid < 2 {
-			mid = 2
+		if room := rowW - lead - trail - utils.DisplayWidth(chips) - utils.DisplayWidth(tips); room >= 2 {
+			footer := lipgloss.JoinHorizontal(lipgloss.Left,
+				strip.Render(strings.Repeat(" ", lead)),
+				chips,
+				strip.Render(strings.Repeat(" ", room)),
+				tips,
+				strip.Render(strings.Repeat(" ", trail)),
+			)
+			parts = append(parts, blankStrip, fill(strip, footer), blankStrip)
+		} else {
+			// Too narrow to share a row: the hints drop to their own
+			// right-aligned strip row — an overflow would wrap mid-hint.
+			parts = append(parts,
+				blankStrip,
+				fill(strip, strip.Render(strings.Repeat(" ", lead))+chips),
+				fill(strip, strip.Render(strings.Repeat(" ", max(0, rowW-utils.DisplayWidth(tips)-trail)))+tips+strip.Render(strings.Repeat(" ", trail))),
+				blankStrip,
+			)
 		}
-		footer := lipgloss.JoinHorizontal(lipgloss.Left,
-			strip.Render(strings.Repeat(" ", lead)),
-			chips,
-			strip.Render(strings.Repeat(" ", mid)),
-			tips,
-			strip.Render(strings.Repeat(" ", trail)),
-		)
-		// Vertical breathing: a full-width blank strip row above and below the
-		// chips. The row must be width-1, not width: with the left border,
-		// lipgloss squeezes the content box to Width-1 and word-wraps a
-		// whitespace-only line one column over into nothing — the surface
-		// background collapses with it (the empty style-on-nothing span).
-		blankStrip := strip.Render(strings.Repeat(" ", width-1))
-
-		parts = append(parts, "", blankStrip, footer, blankStrip)
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
@@ -736,6 +747,22 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 		BorderBackground(theme.BgPanel).
 		BorderForeground(borderColor).
 		Render(content)
+}
+
+// permissionDisplayTitle presents the tool call title for the prompt. MCP
+// tools arrive as mcp__<server>__<tool> — shown as "<server>: <tool>" so
+// the prompt reads like a sentence instead of wire noise. Anything else
+// passes through untouched.
+func permissionDisplayTitle(title string) string {
+	rest, ok := strings.CutPrefix(title, "mcp__")
+	if !ok {
+		return title
+	}
+	server, tool, found := strings.Cut(rest, "__")
+	if !found || server == "" || tool == "" {
+		return title
+	}
+	return server + ": " + tool
 }
 
 // permissionKindIcon maps the ACP tool kind to opencode's muted kind icon
@@ -1255,6 +1282,44 @@ func (m *Model) renderHelpPanel() string {
 		rows = append(rows, base.Padding(0, 1).Width(contentW).Render(base.Foreground(theme.TextAsh).Render(ln)))
 	}
 	return m.popupPanel("Help", "", rows)
+}
+
+// renderMcpStatusPanel draws the /status overlay: every known MCP server
+// with its connect outcome (✓ connected · tool count, ✗ failed, · not yet
+// connected — the settings-only picture before a session exists).
+// Dismiss-only, matching help/export.
+func (m *Model) renderMcpStatusPanel() string {
+	base, contentW := m.popupBase()
+	var rows []string
+	servers := m.knownMcpServers()
+	if len(servers) == 0 {
+		rows = append(rows, base.Padding(0, 1).Width(contentW).
+			Render(base.Foreground(theme.TextMute).Render("No MCP servers configured")))
+	}
+	for _, srv := range servers {
+		detail := srv.Type
+		if detail != "" {
+			detail += " · "
+		}
+		var row string
+		var col color.Color
+		switch srv.Status {
+		case "connected":
+			row = fmt.Sprintf("✓ %s  %s%d tools", srv.Name, detail, srv.Tools)
+			col = theme.Success
+		case "failed":
+			row = fmt.Sprintf("✗ %s  %sconnect failed", srv.Name, detail)
+			col = theme.TextMute
+		default:
+			row = fmt.Sprintf("· %s  %sconfigured", srv.Name, detail)
+			col = theme.TextAsh
+		}
+		rows = append(rows, base.Padding(0, 1).Width(contentW).
+			Render(base.Foreground(col).Render(row)))
+	}
+	footer := base.Padding(0, 1).Width(contentW).
+		Render(base.Foreground(theme.TextMute).Render("any key closes"))
+	return m.popupPanelStyled(base, contentW, "MCP Status", "", rows, footer)
 }
 
 // renderSearchPanel draws the /search overlay as a borderless popup: a live

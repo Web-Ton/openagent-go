@@ -102,6 +102,12 @@ type Model struct {
 	spinner components.Loading
 	loading bool
 
+	// turnEpoch guards turn-end bookkeeping against abandoned turns: /new
+	// and session load increment it, and a stale promptDone/acpErrorMsg
+	// from the abandoned turn (its cancel wind-down can land seconds
+	// later) no longer resets loading or drains the NEW turn's queue.
+	turnEpoch int
+
 	statusBar components.StatusBar
 
 	turnId int64
@@ -157,6 +163,11 @@ type Model struct {
 	// mcpServers is the session's MCP server list with connect outcomes
 	// (mcp_servers_update, full snapshot), rendered in the sidebar.
 	mcpServers []openacp.McpServerStatus
+
+	// mcpConfigured seeds the welcome MCP indicator from settings before
+	// any session exists; the first wire snapshot replaces the picture.
+	// Sidebar rendering ignores it (chat implies a live session).
+	mcpConfigured []openacp.McpServerStatus
 
 	needAutoScroll bool
 
@@ -314,6 +325,7 @@ const (
 	panelModePlugins
 	panelModeConfig
 	panelModeExport
+	panelModeStatus
 )
 
 // maxHistory caps the input history ring.
@@ -387,6 +399,7 @@ const (
 	actionPlugins
 	actionSplit
 	actionCompact
+	actionStatus
 )
 
 // panelCommand is a slash-command entry for the command panel.
@@ -426,6 +439,7 @@ func allPanelCommands() []panelCommand {
 		{"/export", "Export transcript to Markdown", actionExport, true, false, true},
 		{"/edit", "Edit a past user message", actionEdit, true, false, true},
 		{"/theme", "Cycle color theme", actionTheme, true, true, true},
+		{"/status", "MCP server status", actionStatus, true, false, true},
 		{"/split", "Toggle split view", actionSplit, true, false, true},
 		{"/exit", "Exit the app", actionExit, true, false, true},
 	}
@@ -719,6 +733,9 @@ type promptDoneMsg struct {
 	// steps is the finished prompt's kernel turn count (model↔tool round
 	// trips) from the response _meta; 0 when unknown (aborted, older peer).
 	steps int
+	// epoch is the turn generation this prompt was fired under; handlers
+	// ignore mismatches (an abandoned turn's late landing).
+	epoch int
 }
 type notifyClearMsg struct {
 	// id is the toastID epoch of the notify that scheduled this clear; the
@@ -726,7 +743,10 @@ type notifyClearMsg struct {
 	id int
 }
 type flushViewportMsg struct{}
-type acpErrorMsg struct{ err error }
+type acpErrorMsg struct {
+	err   error
+	epoch int // turn generation; stale errors from abandoned turns are dropped
+}
 type usageUpdateMsg struct{ used, total int }
 type modeUpdateMsg struct{ mode string }
 type newSessionMsg struct {
@@ -850,6 +870,18 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case permissionRequestMsg:
+		// A request racing a session reset (/new or session switch): with
+		// no active session there is nothing to approve for, and the
+		// dialog would intercept every keystroke on the fresh page —
+		// answer cancelled and drop it.
+		if m.activeSessionID == "" {
+			if msg.replyCh != nil {
+				msg.replyCh <- openacp.RequestPermissionResponse{
+					Outcome: openacp.RequestPermissionOutcome{Outcome: "cancelled"},
+				}
+			}
+			return m, nil
+		}
 		m.permissionReq = &msg.req
 		m.permissionReplyCh = msg.replyCh
 		m.permissionSelectedIdx = 0
@@ -1195,6 +1227,11 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case promptDoneMsg:
+		if msg.epoch != m.turnEpoch {
+			// An abandoned turn's late landing (/new or session switch) —
+			// the fresh generation owns loading and the queue now.
+			return m, nil
+		}
 		m.retry = nil
 		if m.compacting {
 			// /compact round-trip finished: the compact block already shows
@@ -1463,6 +1500,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.trimMessageStore()
 		return m.markContentDirty()
 	case acpErrorMsg:
+		if msg.epoch != m.turnEpoch {
+			return m, nil // stale error from an abandoned turn
+		}
 		if m.compacting {
 			// A failed /compact round-trip: restore idle state and surface
 			// the error through the normal error path below.
@@ -1562,6 +1602,16 @@ func (m *Model) respondPermissionInstead(text string) {
 
 // closePermissionDialog tears down the open dialog and its transient
 // custom-input state.
+// abandonPendingPermission answers an unanswered permission request with
+// the cancelled outcome and closes the dialog. Session resets (/new,
+// session load) must call it: the dialog intercepts every keystroke, so a
+// dialog left pending after a reset would make the fresh page mute.
+func (m *Model) abandonPendingPermission() {
+	if m.permissionReq != nil {
+		m.respondPermission(-1)
+	}
+}
+
 func (m *Model) closePermissionDialog() {
 	m.permissionReq = nil
 	m.permissionReplyCh = nil
@@ -1713,6 +1763,21 @@ func (m *Model) runSlashCommand(text string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// SetConfiguredMcpServers seeds the MCP picture from settings before any
+// session exists; the first wire snapshot replaces it with live outcomes.
+func (m *Model) SetConfiguredMcpServers(servers []openacp.McpServerStatus) {
+	m.mcpConfigured = servers
+}
+
+// knownMcpServers returns the freshest MCP picture: live wire outcomes once
+// a session has reported them, else the settings-configured list.
+func (m *Model) knownMcpServers() []openacp.McpServerStatus {
+	if len(m.mcpServers) > 0 {
+		return m.mcpServers
+	}
+	return m.mcpConfigured
+}
+
 // notify shows a transient toast (a floating box in the top-right corner,
 // see renderToast); it auto-clears after notifyDuration. Callers should
 // return the returned cmd from Update. Each call re-epochs toastID so an
@@ -1822,15 +1887,16 @@ func (m *Model) sendPrompt(text string) {
 	if sess == nil || ctx == nil || program == nil {
 		return
 	}
+	ep := m.turnEpoch
 	go func() {
 		resp, err := sess.Prompt(ctx, openacp.PromptRequest{
 			Prompt: []openacp.ContentBlock{{Type: "text", Text: text}},
 		})
 		if err != nil {
-			program.Send(acpErrorMsg{err: err})
+			program.Send(acpErrorMsg{err: err, epoch: ep})
 			return
 		}
-		program.Send(promptDoneMsg{steps: acpMetaInt(resp.Meta, "turn_count")})
+		program.Send(promptDoneMsg{steps: acpMetaInt(resp.Meta, "turn_count"), epoch: ep})
 	}()
 }
 
@@ -1905,6 +1971,12 @@ func (m *Model) executeCommand(pc panelCommand) (tea.Model, tea.Cmd) {
 		if m.loading {
 			m.cancelPrompt()
 		}
+		// A pending permission request MUST be answered before the reset:
+		// the dialog intercepts every keystroke, so leaving it pending
+		// would leave the fresh welcome page mute. The abandoned turn's
+		// late bookkeeping is fenced off by turnEpoch.
+		m.abandonPendingPermission()
+		m.turnEpoch++
 		m.activeSessionID = ""
 		m.sessionTitle = ""
 		m.messages = nil
@@ -1980,6 +2052,13 @@ func (m *Model) executeCommand(pc panelCommand) (tea.Model, tea.Cmd) {
 		return m.cycleTheme()
 	case actionPlugins:
 		return m.openPluginsPanel()
+	case actionStatus:
+		m.panelOpen = true
+		m.panelMode = panelModeStatus
+		m.panelFromSlash = false // centered
+		m.panelFilter = ""
+		m.panelIdx = 0
+		return m, nil
 	case actionSplit:
 		m.splitView = !m.splitView
 		m.viewportDirty = true
@@ -2268,6 +2347,8 @@ func (m *Model) execSelectedSession() (tea.Model, tea.Cmd) {
 	// Enter the chat view: a session picked straight from the welcome page
 	// must leave the welcome screen, or the replayed transcript would stay
 	// invisible (View renders welcome until inChat is set).
+	m.abandonPendingPermission()
+	m.turnEpoch++
 	m.inChat = true
 	m.messages = nil
 	// The target session's own replay re-counts turns; usage waits for its
