@@ -656,6 +656,10 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 		for _, ln := range lines {
 			parts = append(parts, fill(panel, panel.Foreground(theme.TextNormal).Render("  "+ln)))
 		}
+	} else {
+		// No body detail: the header still keeps opencode's content gap —
+		// a panel-colored margin row below the title before the strip.
+		parts = append(parts, fill(panel, ""))
 	}
 	// Chips blend into the strip (opencode): every option carries the
 	// strip background with one column of internal padding, so an

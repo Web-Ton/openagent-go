@@ -2929,6 +2929,14 @@ func TestPermissionPanelOpencodeHeader(t *testing.T) {
 	if !strings.Contains(doc, "    # agent-browser: agent_browser_check") {
 		t.Errorf("icon/title line must be inset four columns with a space after the kind icon:\n%s", doc)
 	}
+	for i, line := range lines {
+		if strings.Contains(line, "agent-browser: agent_browser_check") {
+			if i+1 >= len(lines) || strings.Trim(lines[i+1], "┃ ") != "" {
+				t.Errorf("title area needs a blank bottom margin row:\n%s", doc)
+			}
+			break
+		}
+	}
 }
 
 // TestPermissionPanelChipsBlendIntoStrip pins the opencode chip treatment:
