@@ -612,12 +612,13 @@ func (m *Model) renderScrollbar(height int) string {
 
 // renderPermissionPanel renders an inline panel (replacing the input area)
 // showing the tool call that needs approval, styled after opencode's
-// permission prompt: a warning left rail on the panel background, a
-// two-line header ("⚠ Permission required" over the muted kind icon and
-// tool title), the raw command or path as body detail under a muted label,
-// and the options as horizontal chips on a surface strip with a blank
-// strip row above and below (vertical breathing). The selected chip is
-// filled with the warning color. Bottom-aligned above status.
+// permission prompt: a warning left rail on the panel background, a blank
+// breathing row, the "△ Permission required" header in normal text, the
+// muted kind icon and tool title two columns deeper, the raw command or
+// path as body detail under a muted label, and the options as horizontal
+// chips that blend into the surface strip — only the selection lights up
+// with the warning color. Blank strip rows above and below the chips give
+// the strip vertical breathing. Bottom-aligned above status.
 func (m *Model) renderPermissionPanel(width, _ int) string {
 	req := m.permissionReq
 	tc := req.ToolCall
@@ -628,8 +629,7 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 
 	panel := theme.BaseStyle().Background(theme.BgPanel)
 	strip := theme.BaseStyle().Background(theme.BgSurface)
-	yellow := lipgloss.Color("#ffd60a")
-	warn := theme.BaseStyle().Background(theme.BgPanel).Foreground(yellow)
+	warn := theme.BaseStyle().Background(theme.BgPanel).Foreground(theme.Warning)
 	muted := panel.Foreground(theme.TextAsh)
 
 	// Every row is filled out to the content box (width-1 — the left
@@ -643,24 +643,24 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 		return bg.Render(line) + bg.Render(strings.Repeat(" ", max(0, rowW-utils.DisplayWidth(line))))
 	}
 
-	headerTitle := lipgloss.JoinHorizontal(lipgloss.Left,
-		warn.Render("⚠"),
-		panel.Foreground(theme.TextNormal).Render(" Permission required"),
-	)
-
-	// Body detail: what is actually being approved, per opencode — the
-	// shell command ("$ cmd") or the path in question ("- path") under a
-	// muted label. Skipped when the raw input carries neither.
+	// opencode's header: a blank breathing row on top, the warning
+	// triangle and title in normal text, and the muted kind icon plus
+	// title two columns deeper (icon and title separated by a space).
 	parts := []string{
-		fill(panel, headerTitle),
-		fill(panel, muted.Render("  "+permissionKindIcon(tc.Kind)+title)),
+		fill(panel, ""),
+		fill(panel, warn.Render("  △")+panel.Foreground(theme.TextNormal).Render(" Permission required")),
+		fill(panel, muted.Render("    "+permissionKindIcon(tc.Kind)+" ")+panel.Foreground(theme.TextNormal).Render(title)),
 	}
 	if label, lines, ok := permissionDetail(tc.RawInput, width-6); ok {
-		parts = append(parts, fill(panel, ""), fill(panel, muted.Render("   "+label)))
+		parts = append(parts, fill(panel, ""), fill(panel, muted.Render("  "+label)))
 		for _, ln := range lines {
-			parts = append(parts, fill(panel, panel.Foreground(theme.TextNormal).Render("   "+ln)))
+			parts = append(parts, fill(panel, panel.Foreground(theme.TextNormal).Render("  "+ln)))
 		}
 	}
+	// Chips blend into the strip (opencode): every option carries the
+	// strip background with one column of internal padding, so an
+	// unselected option reads as muted text and only the selection lights
+	// up. Neighbors are separated by a single strip-colored column.
 	chipParts := make([]string, 0, len(req.Options)*2+2)
 	for i, opt := range req.Options {
 		name := opt.Name
@@ -668,13 +668,13 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 			name = string(opt.OptionID)
 		}
 		if i > 0 {
-			chipParts = append(chipParts, panel.Render("  "))
+			chipParts = append(chipParts, strip.Render(" "))
 		}
 		if i == m.permissionSelectedIdx {
 			chipParts = append(chipParts,
 				theme.BaseStyle().Background(theme.Warning).Foreground(theme.TextInk).Render(" "+name+" "))
 		} else {
-			chipParts = append(chipParts, muted.Render(name))
+			chipParts = append(chipParts, strip.Foreground(theme.TextAsh).Render(" "+name+" "))
 		}
 	}
 	// The synthetic "Custom..." chip opens the free-text line (client-side
@@ -682,13 +682,13 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 	// reject_once with the text as feedback). It sits one past the last
 	// server option in the ↑↓ order.
 	if len(req.Options) > 0 {
-		chipParts = append(chipParts, panel.Render("  "))
+		chipParts = append(chipParts, strip.Render(" "))
 	}
 	if m.permissionSelectedIdx == len(req.Options) {
 		chipParts = append(chipParts,
 			theme.BaseStyle().Background(theme.Warning).Foreground(theme.TextInk).Render(" Custom... "))
 	} else {
-		chipParts = append(chipParts, muted.Render("Custom..."))
+		chipParts = append(chipParts, strip.Foreground(theme.TextAsh).Render(" Custom... "))
 	}
 	chips := lipgloss.JoinHorizontal(lipgloss.Left, chipParts...)
 
@@ -699,7 +699,7 @@ func (m *Model) renderPermissionPanel(width, _ int) string {
 			components.RenderCommandTipOn("enter", "send", theme.BgSurface),
 			components.RenderCommandTipOn("esc", "back", theme.BgSurface),
 		)
-		inputText := " " + m.permTextarea.View()
+		inputText := "  " + m.permTextarea.View()
 		tipsLine := strip.Render(strings.Repeat(" ", max(0, rowW-utils.DisplayWidth(tips)-1))) + tips + strip.Render(" ")
 		parts = append(parts, fill(panel, ""), fill(strip, inputText), fill(strip, tipsLine))
 	} else {

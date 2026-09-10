@@ -2830,7 +2830,7 @@ func openPermissionPanel(t *testing.T, termW int) (*Model, string) {
 	m.Update(tea.WindowSizeMsg{Width: termW, Height: 36})
 	replyCh := make(chan openacp.RequestPermissionResponse, 1)
 	m.Update(permissionRequestMsg{req: openacp.RequestPermissionRequest{
-		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1", Title: "mcp__agent-browser__agent_browser_check"},
+		ToolCall: openacp.ToolCallUpdate{ToolCallID: "tc1", Kind: "execute", Title: "mcp__agent-browser__agent_browser_check"},
 		Options: []openacp.PermissionOption{
 			{OptionID: "allow_once", Name: "Allow once", Kind: openacp.PermissionAllowOnce},
 			{OptionID: "allow_always", Name: "Allow always", Kind: openacp.PermissionAllowAlways},
@@ -2909,6 +2909,47 @@ func TestPermissionPanelNarrowStacksTips(t *testing.T) {
 	}
 	if !strings.HasSuffix(tipsRow, "select ") {
 		t.Errorf("stacked hints not right-aligned: %q", tipsRow)
+	}
+}
+
+// TestPermissionPanelOpencodeHeader pins the opencode-aligned panel chrome:
+// a blank breathing row on top, the "△ Permission required" header with the
+// title in normal text, and the muted kind icon two columns deeper followed
+// by the title after one space.
+func TestPermissionPanelOpencodeHeader(t *testing.T) {
+	_, raw := openPermissionPanel(t, 190)
+	doc := utils.StripANSI(raw)
+	lines := strings.Split(doc, "\n")
+	if strings.Trim(lines[0], "┃ ") != "" {
+		t.Errorf("first panel row must be a blank breathing row: %q", lines[0])
+	}
+	if !strings.Contains(doc, "△ Permission required") {
+		t.Errorf("header must read \"△ Permission required\":\n%s", doc)
+	}
+	if !strings.Contains(doc, "    # agent-browser: agent_browser_check") {
+		t.Errorf("icon/title line must be inset four columns with a space after the kind icon:\n%s", doc)
+	}
+}
+
+// TestPermissionPanelChipsBlendIntoStrip pins the opencode chip treatment:
+// unselected options carry the strip background (they melt into the strip,
+// no darker boxes) with one column of internal padding, the selection is
+// the warning color, and the whole panel uses a single warning hue — the
+// old two-yellow mix (#ffd60a) is gone.
+func TestPermissionPanelChipsBlendIntoStrip(t *testing.T) {
+	_, raw := openPermissionPanel(t, 190)
+	if strings.Contains(raw, "255;214;10") {
+		t.Errorf("panel still emits the #ffd60a yellow; warning must be theme.Warning only")
+	}
+	unselected := theme.BaseStyle().Background(theme.BgSurface).Foreground(theme.TextAsh)
+	for _, name := range []string{" Allow always ", " Reject ", " Custom... "} {
+		if !strings.Contains(raw, unselected.Render(name)) {
+			t.Errorf("unselected chip %q is not strip-background padded", name)
+		}
+	}
+	selected := theme.BaseStyle().Background(theme.Warning).Foreground(theme.TextInk).Render(" Allow once ")
+	if !strings.Contains(raw, selected) {
+		t.Errorf("selected chip must be warning-filled with one column of padding")
 	}
 }
 
