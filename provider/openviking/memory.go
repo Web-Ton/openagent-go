@@ -112,7 +112,18 @@ func (m *Memory) Recall(ctx context.Context, scope ctxpkg.ContextScope, query st
 // shared long-term knowledge base scoped by the server's own identity
 // (account/user), not by ContextScope — the scope is not applied on the
 // wire. Deployments needing per-user isolation scope the server side.
-func (m *Memory) Store(ctx context.Context, _ ctxpkg.ContextScope, item ctxpkg.MemoryItem) error {
-	_, err := m.client.Remember(ctx, item.Content)
-	return err
+//
+// In session-reuse mode (Client created via NewClientWithSession), the
+// message is appended to a per-conversation OV session (derived from
+// scope.SessionID) with scope.UserID as peer_id (for memory attribution),
+// and commit is deferred to the threshold check (MaybeCommit). In legacy
+// mode (NewClient), Remember creates a fresh session and commits
+// immediately per call.
+func (m *Memory) Store(ctx context.Context, scope ctxpkg.ContextScope, item ctxpkg.MemoryItem) error {
+	ovSID := m.client.SessionIDFor(scope.SessionID)
+	_, err := m.client.AddMessage(ctx, "assistant", item.Content, scope.UserID, ovSID)
+	if err != nil {
+		return err
+	}
+	return m.client.MaybeCommit(ctx, ovSID)
 }
