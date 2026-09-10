@@ -103,9 +103,15 @@ func RunREST(ctx context.Context, cfg *config.Config) error {
 		deps.Summarizer = sumz
 	}
 
-	if err := applyContextProviders(cfg, &deps); err != nil {
+	providerCleanup, err := applyContextProviders(cfg, &deps)
+	if err != nil {
 		return err
 	}
+	defer func() {
+		if providerCleanup != nil {
+			providerCleanup()
+		}
+	}()
 	// The extractor captures the MemoryProvider it writes to — build it
 	// AFTER applyContextProviders so the effective provider is used.
 	// Building it earlier would fork writes to the local sqlite store

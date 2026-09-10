@@ -16,7 +16,7 @@ func TestApplyContextProviders_EndpointSwitchesAll(t *testing.T) {
 		OpenViking: config.OpenVikingConfig{Endpoint: "http://127.0.0.1:1933"},
 	}
 	var deps kernel.Deps
-	if err := applyContextProviders(cfg, &deps); err != nil {
+	if _, err := applyContextProviders(cfg, &deps); err != nil {
 		t.Fatal(err)
 	}
 	if deps.MemoryProvider == nil {
@@ -59,7 +59,7 @@ func TestApplyContextProviders_BuiltinOverride(t *testing.T) {
 		OpenViking: config.OpenVikingConfig{Endpoint: "http://127.0.0.1:1933"},
 	}
 	var deps kernel.Deps
-	if err := applyContextProviders(cfg, &deps); err != nil {
+	if _, err := applyContextProviders(cfg, &deps); err != nil {
 		t.Fatal(err)
 	}
 	if deps.MemoryProvider != nil {
@@ -78,7 +78,7 @@ func TestApplyContextProviders_BuiltinOverride(t *testing.T) {
 func TestApplyContextProviders_NoEndpoint(t *testing.T) {
 	cfg := &config.Config{}
 	var deps kernel.Deps
-	if err := applyContextProviders(cfg, &deps); err != nil {
+	if _, err := applyContextProviders(cfg, &deps); err != nil {
 		t.Fatal(err)
 	}
 	if deps.MemoryProvider != nil || deps.SkillProvider != nil || deps.ResourceProvider != nil {
@@ -100,7 +100,7 @@ func TestApplyContextProviders_CustomRecallConfig(t *testing.T) {
 		},
 	}
 	var deps kernel.Deps
-	if err := applyContextProviders(cfg, &deps); err != nil {
+	if _, err := applyContextProviders(cfg, &deps); err != nil {
 		t.Fatal(err)
 	}
 	mem, ok := deps.MemoryProvider.(*openviking.Memory)

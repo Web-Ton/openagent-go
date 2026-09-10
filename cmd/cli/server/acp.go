@@ -160,7 +160,8 @@ func BuildACPServer(ctx context.Context, cfg *config.Config) (*openacpsdk.Server
 		}
 	}
 
-	if err := applyContextProviders(cfg, &deps); err != nil {
+	providerCleanup, err := applyContextProviders(cfg, &deps)
+	if err != nil {
 		return nil, nil, err
 	}
 	// The extractor captures the MemoryProvider it writes to — build it
@@ -298,9 +299,13 @@ func BuildACPServer(ctx context.Context, cfg *config.Config) (*openacpsdk.Server
 		slog.Warn("channel error", "error", err)
 	}
 
-	// Wrap cleanup to also shutdown telemetry (TracerProvider flush).
-	// This runs when the caller defers cleanup() — after server.Run exits.
+	// Wrap cleanup to also flush context providers (e.g. OpenViking
+	// session) and shutdown telemetry (TracerProvider flush). This runs
+	// when the caller defers cleanup() — after server.Run exits.
 	teardown := func() {
+		if providerCleanup != nil {
+			providerCleanup()
+		}
 		cleanup()
 		telemetryShutdown()
 	}

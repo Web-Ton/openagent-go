@@ -390,8 +390,11 @@ func (rt *Runtime) run(ctx context.Context, session openagent.Session, prefix []
 	rt.state.Turn = result.TurnCount
 	// Self-evolution: store durable knowledge from this finished run.
 	// Knowledge is user-level (cross-session long-term memory) — the
-	// session ID is NOT part of the scope, or every new session would be
-	// filtered away from the knowledge it should recall.
+	// session ID is NOT part of the recall scope, or every new session
+	// would be filtered away from the knowledge it should recall.
+	// However, SessionID IS used by the OpenViking provider's Store
+	// path to route knowledge fragments into per-conversation OV sessions
+	// so VLM extraction sees a coherent conversation context.
 	//
 	// The call is fire-and-forget: AsyncExtractor (the standard wiring)
 	// enqueues and extracts on its background worker, so this never
@@ -399,7 +402,8 @@ func (rt *Runtime) run(ctx context.Context, session openagent.Session, prefix []
 	// server (never per run).
 	if rt.deps.Extractor != nil && len(workingMessages) > 0 {
 		rt.deps.Extractor.Extract(ctx, ctxpkg.ContextScope{
-			UserID: session.UserID,
+			UserID:    session.UserID,
+			SessionID: session.ID,
 		}, workingMessages)
 	}
 	chSend(ctx, ch, openagent.StreamEvent{Type: openagent.StreamDone, Result: result})

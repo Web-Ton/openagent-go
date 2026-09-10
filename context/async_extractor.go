@@ -9,11 +9,12 @@ import (
 )
 
 // AsyncExtractor runs extraction in the background with a single worker:
-// submissions are coalesced per user — the latest messages replace any
-// queued job for the same user — so N finished runs produce at most one
-// extraction pass. Industry practice: write-heavy LLM extraction runs
-// asynchronously (Mem0: extraction at write time, typically background)
-// and must never delay the agent loop.
+// submissions are coalesced per user+conversation — the latest messages
+// replace any queued job for the same user and session — so N finished
+// runs produce at most one extraction pass per conversation. Industry
+// practice: write-heavy LLM extraction runs asynchronously (Mem0:
+// extraction at write time, typically background) and must never delay
+// the agent loop.
 //
 // The worker is bounded: one goroutine, one job at a time, 60s timeout
 // per extraction, queue capacity 64 (a saturated backlog drops new
@@ -23,8 +24,8 @@ type AsyncExtractor struct {
 	inner Extractor
 
 	mu      sync.Mutex
-	pending map[string]extractJob // key: scope.UserID — coalesced to latest
-	queue   chan string           // user keys ready for extraction
+	pending map[string]extractJob // key: scope.UserID+"/"+scope.SessionID
+	queue   chan string           // conversation keys ready for extraction
 	done    chan struct{}         // worker stop (tests)
 }
 
@@ -75,13 +76,13 @@ func (e *AsyncExtractor) Extract(ctx context.Context, scope ContextScope, messag
 	if e == nil || e.inner == nil || len(messages) == 0 {
 		return
 	}
-	key := scope.UserID
+	key := scope.UserID + "/" + scope.SessionID
 	e.mu.Lock()
 	_, queued := e.pending[key]
 	e.pending[key] = extractJob{scope: scope, messages: messages}
 	if !queued {
-		// First submission for this user: announce the key. A saturated
-		// backlog drops the announcement — best-effort by design.
+		// First submission for this conversation: announce the key. A
+		// saturated backlog drops the announcement — best-effort by design.
 		select {
 		case e.queue <- key:
 		default:
@@ -90,7 +91,7 @@ func (e *AsyncExtractor) Extract(ctx context.Context, scope ContextScope, messag
 	e.mu.Unlock()
 }
 
-// worker drains the queue and extracts the latest job per user.
+// worker drains the queue and extracts the latest job per conversation.
 func (e *AsyncExtractor) worker() {
 	for {
 		select {

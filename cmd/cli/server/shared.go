@@ -182,15 +182,44 @@ func resolveModel(cfgModel string, infos []modelReg) openagent.Model {
 // three domains to it by default — one address is enough. context_providers
 // remains as an opt-out escape hatch: an explicit "builtin" for a domain
 // keeps the local backend. No endpoint = fully local, no server required.
-func applyContextProviders(cfg *config.Config, deps *kernel.Deps) error {
-	cp := cfg.ContextProviders
+//
+// Returns a cleanup func that flushes context providers (e.g. OpenViking
+// session) on shutdown — commits any pending messages below the threshold.
+// nil when no provider needs cleanup (no endpoint configured).
+func applyContextProviders(cfg *config.Config, deps *kernel.Deps) (func(), error) {
 	if cfg.OpenViking.Endpoint == "" {
-		return nil
+		return nil, nil
 	}
-	client, err := openviking.NewClient(cfg.OpenViking.Endpoint, cfg.OpenViking.APIKey)
+	client, err := buildOVClient(cfg)
 	if err != nil {
-		return fmt.Errorf("openviking: %w", err)
+		return nil, err
 	}
+	wireOVProviders(cfg, client, deps)
+	return ovFlushCleanup(client), nil
+}
+
+// buildOVClient constructs an OpenViking client with session-reuse config
+// mapped from the settings-layer OVSessionConfig.
+func buildOVClient(cfg *config.Config) (*openviking.Client, error) {
+	s := cfg.OpenViking.Session
+	return openviking.NewClientWithSession(
+		cfg.OpenViking.Endpoint, cfg.OpenViking.APIKey,
+		openviking.SessionConfig{
+			SessionIDSeed:              configDir(),
+			CommitTokenThreshold:       s.CommitTokenThreshold,
+			CommitMessageThreshold:     s.CommitMessageThreshold,
+			MinCommitInterval:          time.Duration(s.MinCommitIntervalSeconds) * time.Second,
+			KeepRecentTurnCount:        s.KeepRecentTurnCount,
+			RetainedMessageTokenBudget: s.RetainedMessageTokenBudget,
+			MinRawTailSteps:            s.MinRawTailSteps,
+		},
+	)
+}
+
+// wireOVProviders switches each domain to OpenViking unless the operator
+// explicitly set "builtin" for that domain in context_providers.
+func wireOVProviders(cfg *config.Config, client *openviking.Client, deps *kernel.Deps) {
+	cp := cfg.ContextProviders
 	if cp.Memory != "builtin" {
 		deps.MemoryProvider = openviking.NewMemoryWithRecall(client, openviking.RecallConfig{
 			Quotas:   cfg.OpenViking.Recall.Quotas,
@@ -204,7 +233,18 @@ func applyContextProviders(cfg *config.Config, deps *kernel.Deps) error {
 	if cp.Resource != "builtin" {
 		deps.ResourceProvider = openviking.NewResource(client)
 	}
-	return nil
+}
+
+// ovFlushCleanup returns a shutdown func that flushes the OpenViking
+// session (commits any pending messages below the threshold).
+func ovFlushCleanup(client *openviking.Client) func() {
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := client.Flush(ctx); err != nil {
+			slog.Warn("openviking session flush failed", "error", err)
+		}
+	}
 }
 
 // sandboxPolicy translates the config-layer SandboxConfig into a

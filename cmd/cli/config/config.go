@@ -131,9 +131,10 @@ type ContextProviderConfig struct {
 // OpenVikingConfig connects to an OpenViking server (direct HTTP API —
 // search/remember/read, no SDK).
 type OpenVikingConfig struct {
-	Endpoint string       `json:"endpoint,omitempty"`                 // e.g. "http://127.0.0.1:1933"
-	APIKey   string       `json:"api_key,omitempty" sensitive:"true"` // Bearer token; empty = no auth
-	Recall   RecallConfig `json:"recall,omitempty"`
+	Endpoint string          `json:"endpoint,omitempty"`                 // e.g. "http://127.0.0.1:1933"
+	APIKey   string          `json:"api_key,omitempty" sensitive:"true"` // Bearer token; empty = no auth
+	Recall   RecallConfig    `json:"recall,omitempty"`
+	Session  OVSessionConfig `json:"session,omitempty"`
 }
 
 // RecallConfig controls OpenViking's type-quota memory recall endpoint
@@ -152,6 +153,33 @@ type RecallConfig struct {
 	Quotas   map[string]int `json:"quotas,omitempty"`
 	MaxChars int            `json:"max_chars,omitempty"`
 	MinScore float64        `json:"min_score,omitempty"`
+}
+
+// OVSessionConfig controls the OpenViking session reuse and commit
+// threshold policy. When OpenViking.Endpoint is set, session reuse is
+// automatically enabled with the built-in defaults. Override individual
+// fields here to tune the thresholds.
+//
+// This is the config-layer mirror of openviking.SessionConfig (provider
+// layer). The two structs exist on different layers to keep the config
+// package independent of the provider package. shared.go's
+// applyContextProviders maps between them field-by-field. If you add a
+// field here, also add it to openviking.SessionConfig and the mapping.
+//
+// Defaults (applied by the provider when zero):
+//   - CommitTokenThreshold: 6000 (pending tokens)
+//   - CommitMessageThreshold: 50 (messages since last commit)
+//   - MinCommitIntervalSeconds: 300 (5 minutes)
+//   - KeepRecentTurnCount: 3 (WM v2 retention)
+//   - RetainedMessageTokenBudget: 6000
+//   - MinRawTailSteps: 1
+type OVSessionConfig struct {
+	CommitTokenThreshold       int `json:"commit_token_threshold,omitempty"`
+	CommitMessageThreshold     int `json:"commit_message_threshold,omitempty"`
+	MinCommitIntervalSeconds   int `json:"commit_min_interval_seconds,omitempty"`
+	KeepRecentTurnCount        int `json:"keep_recent_turn_count,omitempty"`
+	RetainedMessageTokenBudget int `json:"retained_message_token_budget,omitempty"`
+	MinRawTailSteps            int `json:"min_raw_tail_steps,omitempty"`
 }
 
 // EmbeddingConfig selects the semantic-embedding backend for knowledge
