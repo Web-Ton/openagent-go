@@ -66,6 +66,7 @@ const (
 	EventSessionCreate = "HwCloudCli_Session_Create"
 	EventSessionClose  = "HwCloudCli_Session_Close"
 	EventSessionDelete = "HwCloudCli_Session_Delete"
+	EventToolCall      = "IacMcpServer_Tool_Call" // iac-server tool invocation (usage counting)
 )
 
 // EventReq is the contract with the tracking platform.
@@ -90,6 +91,11 @@ type properties struct {
 	DurationMs  int64  `json:"duration_ms"`
 	FailReason  string `json:"fail_reason"`
 	Time        string `json:"time"`
+	// ToolName is set only for tool-call events (EventToolCall); session
+	// events leave it empty.  omitempty keeps session-event JSON free of an
+	// empty "tool_name" field so the tracking-platform schema is unchanged
+	// for ACP/CLI session events.
+	ToolName string `json:"tool_name,omitempty"`
 }
 
 // SessionParams is the input for building an EventReq from a session event.
@@ -99,6 +105,16 @@ type SessionParams struct {
 	SessionMode string
 	DurationMs  int64
 	FailReason  string
+}
+
+// ToolCallParams is the input for building an EventReq from a tool call.
+// Unlike SessionParams it carries a ToolName (not a SessionID/SessionMode)
+// because a tool invocation has no session semantics.
+type ToolCallParams struct {
+	ToolName   string
+	EntryPoint string
+	DurationMs int64
+	FailReason string
 }
 
 // eventHttpClient is set once by Init and read by ReportEvent.  Init must
@@ -141,12 +157,7 @@ func Init() {
 // instance IDs) is used as-is; anything else is MD5-hex encoded.
 func BuildEvent(event string, params SessionParams) EventReq {
 	now := time.Now()
-	host, _ := os.Hostname()
-	identity := host
-	if !isHex32(identity) {
-		sum := md5.Sum([]byte(identity))
-		identity = hex.EncodeToString(sum[:])
-	}
+	identity := deriveIdentity()
 	return EventReq{
 		AnonymousId: identity,
 		DistinctId:  identity,
@@ -165,6 +176,48 @@ func BuildEvent(event string, params SessionParams) EventReq {
 			Time:        now.UTC().Format(time.RFC3339Nano),
 		},
 	}
+}
+
+// BuildToolCallEvent constructs an EventReq for a tool invocation.  Same
+// identity scheme as BuildEvent (hostname-derived 32-char hex).  The
+// tool-call event carries ToolName instead of SessionID/SessionMode — a
+// tool invocation has no session semantics, so those fields are left
+// empty (and omitted from JSON via their struct tags where applicable).
+func BuildToolCallEvent(event string, params ToolCallParams) EventReq {
+	now := time.Now()
+	identity := deriveIdentity()
+	return EventReq{
+		AnonymousId: identity,
+		DistinctId:  identity,
+		Event:       event,
+		Time:        now.UnixMilli(),
+		Type:        "track",
+		Properties: properties{
+			Source:      version.Name,
+			InstanceID:  identity,
+			Version:     version.Version,
+			EntryPoint:  params.EntryPoint,
+			ToolName:    params.ToolName,
+			DurationMs:  params.DurationMs,
+			FailReason:  params.FailReason,
+			Time:        now.UTC().Format(time.RFC3339Nano),
+			// SessionID/SessionMode intentionally empty: a tool call has no session.
+		},
+	}
+}
+
+// deriveIdentity returns the 32-char hex daemon identity used as
+// AnonymousId/DistinctId on every event.  A hostname that is already
+// 32-char hex (Huawei Cloud instance IDs) is used as-is; anything else is
+// MD5-hex encoded.  Extracted so BuildEvent and BuildToolCallEvent share
+// one implementation.
+func deriveIdentity() string {
+	host, _ := os.Hostname()
+	if !isHex32(host) {
+		sum := md5.Sum([]byte(host))
+		return hex.EncodeToString(sum[:])
+	}
+	return host
 }
 
 // isHex32 reports whether s is exactly 32 lowercase-hex characters —
@@ -292,5 +345,43 @@ func (o *Observer) OnSessionDelete(ctx context.Context, e openagent.SessionLifec
 		SessionMode: e.SessionMode,
 		DurationMs:  e.DurationMs,
 		FailReason:  failReason,
+	}))
+}
+
+// ── ToolCallObserver implementation ──
+
+// ToolCallObserverImpl implements openagent.ToolCallObserver, adapting
+// tool-call events to HTTP tracking reports.  It is the tool-call analogue
+// of Observer (which implements SessionObserver): the bridge between the
+// ToolCallObserver interface and the Report* functions in this package.
+//
+// Named ToolCallObserverImpl (not "Observer") to avoid colliding with the
+// existing session Observer.  The asymmetry is deliberate — renaming
+// Observer to SessionObserverImpl is a wider change reserved for later.
+type ToolCallObserverImpl struct{}
+
+var toolCallObserver = &ToolCallObserverImpl{}
+
+func init() {
+	toolCallObserver = &ToolCallObserverImpl{}
+}
+
+// GetToolCallObserver returns the package-level ToolCallObserver singleton.
+// Safe to call before Init; OnToolCall is a no-op when tracking is disabled
+// (empty EventPostUrl) because ReportEvent returns immediately.
+func GetToolCallObserver() *ToolCallObserverImpl {
+	return toolCallObserver
+}
+
+func (o *ToolCallObserverImpl) OnToolCall(ctx context.Context, e openagent.ToolCallEvent) {
+	failReason := ""
+	if e.Err != nil {
+		failReason = e.Err.Error()
+	}
+	ReportEvent(ctx, BuildToolCallEvent(EventToolCall, ToolCallParams{
+		ToolName:   e.ToolName,
+		EntryPoint: e.EntryPoint,
+		DurationMs: e.DurationMs,
+		FailReason: failReason,
 	}))
 }

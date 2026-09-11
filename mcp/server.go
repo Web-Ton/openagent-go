@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	openagent "github.com/yusheng-g/openagent-go"
@@ -22,6 +23,12 @@ import (
 type Server struct {
 	inner *mcpsdk.Server
 	opts  ServerOptions
+	// toolCallObserver receives a ToolCallEvent at the completion of each
+	// tool.Execute (every tools/call request).  nil = no tracking.  Wired at
+	// assembly time via SetToolCallObserver — the mcp package does NOT import
+	// track, mirroring the acp package's "server does not import track, only
+	// the assembly layer wires concrete observers" constraint.
+	toolCallObserver openagent.ToolCallObserver
 }
 
 // ServerOptions configures a [Server].
@@ -46,6 +53,15 @@ func NewServer(name, version string, opts *ServerOptions) *Server {
 	return s
 }
 
+// SetToolCallObserver wires a ToolCallObserver that receives a
+// ToolCallEvent at the completion of every tool.Execute (each tools/call
+// request).  Call once at assembly time (e.g. iac-server main.go) before
+// serving.  nil = no tracking (events silently dropped).  Safe to call
+// before the server starts serving.
+func (s *Server) SetToolCallObserver(obs openagent.ToolCallObserver) {
+	s.toolCallObserver = obs
+}
+
 // AddTool registers an openagent.Tool as an MCP tool on this server.
 // The tool's FunctionDefinition and Execute are adapted to MCP's
 // ToolHandler interface.
@@ -56,36 +72,7 @@ func (s *Server) AddTool(tool openagent.Tool) error {
 	}
 
 	mcpTool := ToMCPTool(def)
-
-	// Adapter: MCP ToolHandler → openagent Tool.Execute.
-	// The handler receives raw JSON arguments, passes them to Execute,
-	// and wraps the result in MCP TextContent.
-	//
-	// If the client supplied a progressToken, a [ProgressFunc] is built from
-	// the server session and injected into the context so the tool can stream
-	// progress notifications back to the client during long-running calls.
-	// The session ID is also injected so tools can distinguish same-client
-	// retries from cross-client conflicts on shared resources.
-	handler := func(ctx context.Context, req *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
-		ctx = withProgress(ctx, req)
-		ctx = withSessionID(ctx, req)
-		output := tool.Execute(ctx, req.Params.Arguments)
-		if output.Error != nil {
-			return &mcpsdk.CallToolResult{
-				IsError: true,
-				Content: []mcpsdk.Content{
-					&mcpsdk.TextContent{Text: output.Error.Message},
-				},
-			}, nil
-		}
-		return &mcpsdk.CallToolResult{
-			Content: []mcpsdk.Content{
-				&mcpsdk.TextContent{Text: output.Content},
-			},
-		}, nil
-	}
-
-	s.inner.AddTool(mcpTool, handler)
+	s.inner.AddTool(mcpTool, s.buildToolHandler(tool))
 	return nil
 }
 
@@ -128,11 +115,45 @@ func (s *Server) AddToolWithSchema(tool openagent.Tool, inputSchema json.RawMess
 		Description: def.Description,
 		InputSchema: inputSchema,
 	}
+	s.inner.AddTool(mcpTool, s.buildToolHandler(tool))
+	return nil
+}
 
-	handler := func(ctx context.Context, req *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
+// buildToolHandler adapts an openagent.Tool to the MCP ToolHandler
+// signature.  It is the single shared handler used by both AddTool and
+// AddToolWithSchema, so tool-call tracking is wired once here instead of
+// being duplicated across the two registration paths.
+//
+// The handler injects progress + sessionID, executes the tool, emits a
+// ToolCallEvent (for tracking/usage counting) when a ToolCallObserver is
+// wired, and wraps the result in MCP TextContent.  If the client supplied
+// a progressToken, a [ProgressFunc] is built from the server session and
+// injected into the context so the tool can stream progress notifications
+// back to the client during long-running calls.  The session ID is also
+// injected so tools can distinguish same-client retries from cross-client
+// conflicts on shared resources.
+func (s *Server) buildToolHandler(tool openagent.Tool) func(ctx context.Context, req *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
+	def := tool.Definition()
+	return func(ctx context.Context, req *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
 		ctx = withProgress(ctx, req)
 		ctx = withSessionID(ctx, req)
+		start := time.Now()
 		output := tool.Execute(ctx, req.Params.Arguments)
+
+		// Emit a tool-call event for observers (tracking, etc.).  nil =
+		// silently dropped.  The event carries the wall-clock duration of
+		// tool.Execute; for async tools (iac-server jobs) this is the job
+		// *submission* time, not the full LLM run — by design (usage-count
+		// granularity, not end-to-end).
+		if s.toolCallObserver != nil {
+			s.toolCallObserver.OnToolCall(ctx, openagent.ToolCallEvent{
+				ToolName:   def.Name,
+				EntryPoint: openagent.EntryPointIAC,
+				DurationMs: time.Since(start).Milliseconds(),
+				Err:        output.AsError(),
+			})
+		}
+
 		if output.Error != nil {
 			return &mcpsdk.CallToolResult{
 				IsError: true,
@@ -147,9 +168,6 @@ func (s *Server) AddToolWithSchema(tool openagent.Tool, inputSchema json.RawMess
 			},
 		}, nil
 	}
-
-	s.inner.AddTool(mcpTool, handler)
-	return nil
 }
 
 // withSessionID injects the MCP server session ID into ctx so tools can

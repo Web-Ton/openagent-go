@@ -62,6 +62,7 @@ import (
 	sessionsqlite "github.com/yusheng-g/openagent-go/session/sqlite"
 	skillfs "github.com/yusheng-g/openagent-go/skill/fs"
 	"github.com/yusheng-g/openagent-go/summarizer"
+	"github.com/yusheng-g/openagent-go/track"
 	"github.com/yusheng-g/openagent-go/version"
 )
 
@@ -267,6 +268,13 @@ func main() {
 	server := mcp.NewServer(mcpServerName, "0.0.1", &mcp.ServerOptions{
 		Logger: slog.Default(),
 	})
+	// Wire tool-call tracking.  track.Init is a no-op when EventPostUrl is
+	// empty (plain `go build`, dev/e2e), so only ldflags-injected builds emit
+	// events.  This is the only place iac-server imports track — mirroring
+	// the acp/cli assembly layer (server code does not import track, only the
+	// assembly layer wires concrete observers).
+	track.Init()
+	server.SetToolCallObserver(track.GetToolCallObserver())
 	if err := server.AddTools(tools); err != nil {
 		fatal(err)
 	}

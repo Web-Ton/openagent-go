@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -418,3 +419,254 @@ func TestIntegration_ServerReceivesAllThreeEventTypes(t *testing.T) {
 		}
 	}
 }
+
+// ── Tool-call event tests ──
+
+func TestBuildToolCallEvent_FieldMapping(t *testing.T) {
+	params := ToolCallParams{
+		ToolName:   "list_deployments",
+		EntryPoint: openagent.EntryPointIAC,
+		DurationMs: 42,
+		FailReason: "boom",
+	}
+	evt := BuildToolCallEvent(EventToolCall, params)
+
+	if evt.Event != EventToolCall {
+		t.Errorf("Event = %q, want %q", evt.Event, EventToolCall)
+	}
+	if evt.Event != "IacMcpServer_Tool_Call" {
+		t.Errorf("Event literal = %q, want IacMcpServer_Tool_Call", evt.Event)
+	}
+	if evt.Type != "track" {
+		t.Errorf("Type = %q, want track", evt.Type)
+	}
+	if evt.Properties.ToolName != "list_deployments" {
+		t.Errorf("ToolName = %q, want list_deployments", evt.Properties.ToolName)
+	}
+	if evt.Properties.EntryPoint != "iac" {
+		t.Errorf("EntryPoint = %q, want iac", evt.Properties.EntryPoint)
+	}
+	if evt.Properties.DurationMs != 42 {
+		t.Errorf("DurationMs = %d, want 42", evt.Properties.DurationMs)
+	}
+	if evt.Properties.FailReason != "boom" {
+		t.Errorf("FailReason = %q, want boom", evt.Properties.FailReason)
+	}
+	// A tool call has no session semantics — these MUST be empty.
+	if evt.Properties.SessionID != "" {
+		t.Errorf("SessionID = %q, want empty (tool call has no session)", evt.Properties.SessionID)
+	}
+	if evt.Properties.SessionMode != "" {
+		t.Errorf("SessionMode = %q, want empty (tool call has no session)", evt.Properties.SessionMode)
+	}
+	// Identity is hostname-derived (same as BuildEvent), not the tool name.
+	if evt.AnonymousId == "" {
+		t.Error("AnonymousId should not be empty (hostname-derived)")
+	}
+	if evt.DistinctId != evt.AnonymousId {
+		t.Errorf("DistinctId = %q, want same as AnonymousId %q", evt.DistinctId, evt.AnonymousId)
+	}
+}
+
+// TestBuildEvent_Session_NoToolNameLeak is a regression guard: adding the
+// ToolName field to properties must NOT pollute session-event JSON.  A
+// session event built via BuildEvent should serialize without a "tool_name"
+// key (omitempty on the empty value).
+func TestBuildEvent_Session_NoToolNameLeak(t *testing.T) {
+	evt := BuildEvent(EventSessionCreate, SessionParams{
+		SessionID:  "s1",
+		EntryPoint: openagent.EntryPointACP,
+	})
+	data, err := json.Marshal(evt)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	props, ok := raw["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("properties missing or wrong type")
+	}
+	if _, present := props["tool_name"]; present {
+		t.Errorf("session event JSON contains tool_name (should be omitted via omitempty): %s", string(data))
+	}
+}
+
+func TestReportEvent_ToolCall(t *testing.T) {
+	savedUrl := EventPostUrl
+	savedClient := eventHttpClient
+	savedAppID := AppID
+	defer func() {
+		EventPostUrl = savedUrl
+		eventHttpClient = savedClient
+		AppID = savedAppID
+	}()
+
+	var receivedBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		receivedBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	EventPostUrl = srv.URL
+	AppID = "test-app"
+	eventHttpClient = srv.Client()
+
+	ReportEvent(context.Background(), BuildToolCallEvent(EventToolCall, ToolCallParams{
+		ToolName:   "apply_deployment",
+		EntryPoint: openagent.EntryPointIAC,
+		DurationMs: 123,
+	}))
+
+	form, err := url.ParseQuery(receivedBody)
+	if err != nil {
+		t.Fatalf("ParseQuery: %v", err)
+	}
+	if form.Get("appid") != "test-app" {
+		t.Errorf("appid = %q, want test-app", form.Get("appid"))
+	}
+	decoded, err := base64.StdEncoding.DecodeString(form.Get("data"))
+	if err != nil {
+		t.Fatalf("base64 decode: %v", err)
+	}
+	var events []EventReq
+	if err := json.Unmarshal(decoded, &events); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Event != EventToolCall {
+		t.Errorf("event = %q, want %q", events[0].Event, EventToolCall)
+	}
+	if events[0].Properties.ToolName != "apply_deployment" {
+		t.Errorf("tool_name = %q, want apply_deployment", events[0].Properties.ToolName)
+	}
+	if events[0].Properties.DurationMs != 123 {
+		t.Errorf("duration_ms = %d, want 123", events[0].Properties.DurationMs)
+	}
+}
+
+func TestToolCallObserverImpl_Delegates(t *testing.T) {
+	savedUrl := EventPostUrl
+	savedClient := eventHttpClient
+	savedAppID := AppID
+	defer func() {
+		EventPostUrl = savedUrl
+		eventHttpClient = savedClient
+		AppID = savedAppID
+	}()
+
+	var receivedBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		receivedBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	EventPostUrl = srv.URL
+	AppID = "test-app"
+	eventHttpClient = srv.Client()
+
+	obs := GetToolCallObserver()
+	if obs == nil {
+		t.Fatal("GetToolCallObserver returned nil")
+	}
+	obs.OnToolCall(context.Background(), openagent.ToolCallEvent{
+		ToolName:   "propose_architecture",
+		EntryPoint: openagent.EntryPointIAC,
+		DurationMs: 500,
+		Err:        nil,
+	})
+
+	form, _ := url.ParseQuery(receivedBody)
+	decoded, _ := base64.StdEncoding.DecodeString(form.Get("data"))
+	var events []EventReq
+	if err := json.Unmarshal(decoded, &events); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Event != EventToolCall {
+		t.Errorf("event = %q, want %q", events[0].Event, EventToolCall)
+	}
+	if events[0].Properties.ToolName != "propose_architecture" {
+		t.Errorf("tool_name = %q, want propose_architecture", events[0].Properties.ToolName)
+	}
+	if events[0].Properties.FailReason != "" {
+		t.Errorf("fail_reason = %q, want empty (Err was nil)", events[0].Properties.FailReason)
+	}
+}
+
+// TestToolCallObserverImpl_DelegatesWithError verifies FailReason is
+// populated from ToolCallEvent.Err.
+func TestToolCallObserverImpl_DelegatesWithError(t *testing.T) {
+	savedUrl := EventPostUrl
+	savedClient := eventHttpClient
+	savedAppID := AppID
+	defer func() {
+		EventPostUrl = savedUrl
+		eventHttpClient = savedClient
+		AppID = savedAppID
+	}()
+
+	var receivedBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		receivedBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	EventPostUrl = srv.URL
+	AppID = "test-app"
+	eventHttpClient = srv.Client()
+
+	obs := GetToolCallObserver()
+	obs.OnToolCall(context.Background(), openagent.ToolCallEvent{
+		ToolName:   "destroy_deployment",
+		EntryPoint: openagent.EntryPointIAC,
+		DurationMs: 1,
+		Err:        errors.New("permission denied"),
+	})
+
+	form, _ := url.ParseQuery(receivedBody)
+	decoded, _ := base64.StdEncoding.DecodeString(form.Get("data"))
+	var events []EventReq
+	if err := json.Unmarshal(decoded, &events); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if events[0].Properties.FailReason != "permission denied" {
+		t.Errorf("fail_reason = %q, want 'permission denied'", events[0].Properties.FailReason)
+	}
+}
+
+// TestToolCallObserverImpl_NoOpWhenDisabled verifies the observer is a
+// no-op (no HTTP call, no panic) when tracking is disabled — the dev/e2e
+// build default (empty EventPostUrl).
+func TestToolCallObserverImpl_NoOpWhenDisabled(t *testing.T) {
+	savedUrl := EventPostUrl
+	savedClient := eventHttpClient
+	defer func() {
+		EventPostUrl = savedUrl
+		eventHttpClient = savedClient
+	}()
+
+	EventPostUrl = "" // disabled
+	eventHttpClient = nil
+
+	obs := GetToolCallObserver()
+	// Must not panic and must not attempt any network call.
+	obs.OnToolCall(context.Background(), openagent.ToolCallEvent{
+		ToolName:   "list_deployments",
+		EntryPoint: openagent.EntryPointIAC,
+		DurationMs: 1,
+	})
+}
+
