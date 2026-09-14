@@ -1058,6 +1058,7 @@ func sampleConfigOptions() []openacp.SessionConfigOption {
 			CurrentValue: "manual",
 			Options: []openacp.SessionConfigOptValue{
 				{Value: "auto", Name: "Auto", Description: "Fully automated processing (HIGH RISK), AI will NOT seek your approval"},
+				{Value: "semi-auto", Name: "Semi-Auto", Description: "AI auto-executes safe operations, but seeks your approval for destructive operations"},
 				{Value: "manual", Name: "Manual", Description: "Your approval is required for AI to perform NONE-READ-ONLY operations"},
 				{Value: "plan", Name: "Plan", Description: "Present the plan first, AI will execute it according to the plan"},
 			},
@@ -2030,17 +2031,17 @@ func toggleSlash(t *testing.T, m *Model, slash string) *Model {
 // config option, preselected on the current mode.
 func TestToggleModeOpensPickerAdaptedToAgent(t *testing.T) {
 	m := newTestModel()
-	m.configOptions = sampleConfigOptions() // agent modes: auto/manual/plan
+	m.configOptions = sampleConfigOptions() // agent modes: auto/semi-auto/manual/plan
 	m2 := toggleMode(t, m)
 	if !m2.panelOpen || m2.panelMode != panelModeConfig || m2.configPickerID != "mode" {
 		t.Errorf("command must open the mode picker, open=%v mode=%v id=%q",
 			m2.panelOpen, m2.panelMode, m2.configPickerID)
 	}
-	if got := m2.configPickerIndex("mode"); got != 1 { // CurrentValue manual
+	if got := m2.configPickerIndex("mode"); got != 2 { // CurrentValue manual
 		t.Errorf("picker must preselect the current mode, idx=%d", got)
 	}
-	if len(m2.configPickerOptions("mode")) != 3 {
-		t.Errorf("picker rows = %d, want 3 (auto/manual/plan)", len(m2.configPickerOptions("mode")))
+	if len(m2.configPickerOptions("mode")) != 4 {
+		t.Errorf("picker rows = %d, want 4 (auto/semi-auto/manual/plan)", len(m2.configPickerOptions("mode")))
 	}
 
 	// The picker adapts: an agent defining different modes gets those rows.
@@ -2073,7 +2074,7 @@ func TestModePanelAppliesViaSetConfigOption(t *testing.T) {
 	m.mode = "manual"
 
 	m2 := toggleMode(t, m)
-	m2.panelIdx = 2 // "plan"
+	m2.panelIdx = 3 // "plan"
 	upd, cmd := m2.panelExecute()
 	m3 := upd.(*Model)
 	if m3.mode != "plan" {
@@ -2090,7 +2091,7 @@ func TestModePanelAppliesViaSetConfigOption(t *testing.T) {
 	// the newly applied mode.
 	m3.configOptions = modeOpts("plan")
 	m4 := toggleMode(t, m3)
-	if m4.configPickerIndex("mode") != 2 {
+	if m4.configPickerIndex("mode") != 3 {
 		t.Errorf("picker must preselect plan, idx=%d", m4.configPickerIndex("mode"))
 	}
 	upd2, cmd2 := m4.panelExecute() // current mode: no-op

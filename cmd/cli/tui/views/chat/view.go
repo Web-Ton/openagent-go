@@ -1281,7 +1281,7 @@ func (m *Model) renderHelpPanel() string {
 		"  /toggle_*         flip transcript visibility",
 		"  /sessions         resume a past session",
 		"  /models           switch the model",
-		"  /toggle_mode      auto / manual / plan",
+		"  /toggle_mode      auto / semi-auto / manual / plan",
 		"  /exit             quit",
 	}
 	var rows []string
