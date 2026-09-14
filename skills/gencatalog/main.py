@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""Refresh skills/INSTALLABLE_SKILLS.json against the remote skill repository.
+
+Shallow-clones https://gitcode.com/huaweicloud/huaweicloud-skills.git,
+recomputes each skill directory's aggregate MD5 with the SAME algorithm
+the skill-manager.wasm plugin uses at runtime (skill/fs.FolderMD5), and
+updates catalog entries whose remote MD5 has changed.
+
+New skills (present remotely, absent from the catalog) and removed skills
+(present in the catalog, absent remotely) are REPORTED ONLY — they are
+never silently added or deleted. Add new entries explicitly with --add.
+
+Usage:
+    python3 skills/gencatalog/main.py                 # refresh + overwrite
+    python3 skills/gencatalog/main.py --dry-run        # print summary, write nothing
+    python3 skills/gencatalog/main.py --add=foo,bar    # refresh + add named skills
+    python3 skills/gencatalog/main.py --clone-dir=/tmp/clone  # reuse an existing clone
+
+Why Python (not Go): the catalog file is itself `json.dumps(d,
+ensure_ascii=False, indent=2)` output. Python's dict preserves insertion
+order (3.7+), json.dumps never HTML-escapes, and there is no
+trailing-newline quirk — so re-serializing an unchanged entry is
+byte-identical with zero custom machinery. A Go port would need a custom
+ordered-map type for every nesting level (the frontmatter values are
+themselves objects/arrays-of-objects), which is bug-prone.
+"""
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+import yaml
+
+REMOTE_URL = "https://gitcode.com/huaweicloud/huaweicloud-skills.git"
+SCHEMA = (
+    "https://gitcode.com/huawei-developers/metadata/raw/master/"
+    "huaweicloud-skills/schema.json"
+)
+SKILL_MD = "SKILL.md"
+
+
+def folder_md5(dirpath, dirname):
+    """Aggregate MD5 of a directory — mirrors skill/fs/md5.go FolderMD5.
+
+    Algorithm:
+        entries = [dirname]
+        walk depth-first; at each level:
+          files (sorted by name)   -> append "relpath:md5(filebytes)"
+          subdirs (sorted by name) -> recurse
+        result = hex(md5("\\n".join(entries)))
+
+    The directory name participates (renaming changes the MD5); the parent
+    path does not (moving does not). Symlinks and special files (FIFO,
+    device, socket) are skipped — parity with Go's walkSorted, which skips
+    them to match Python os.walk(followlinks=False) and to avoid blocking
+    on a FIFO with no writer.
+    """
+    entries = [dirname]
+
+    def walk(root, d):
+        subdirs = []
+        for name in sorted(os.listdir(d)):
+            full = os.path.join(d, name)
+            # Skip symlinks (parity with Go ModeSymlink skip).
+            if os.path.islink(full):
+                continue
+            if os.path.isdir(full):
+                subdirs.append(name)
+                continue
+            # Skip non-regular files (FIFO/device/socket) — parity with Go.
+            if not os.path.isfile(full):
+                continue
+            with open(full, "rb") as f:
+                data = f.read()
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
+            entries.append("{}:{}".format(rel, hashlib.md5(data).hexdigest()))
+        for name in subdirs:
+            walk(root, os.path.join(d, name))
+
+    walk(dirpath, dirpath)
+    return hashlib.md5("\n".join(entries).encode()).hexdigest()
+
+
+def parse_frontmatter(skill_md_text):
+    """Parse YAML frontmatter from SKILL.md, preserving key order.
+
+    Python dicts preserve insertion order (3.7+), so yaml.safe_load already
+    keeps the source order — no custom ordered-map type needed. Returns {}
+    for missing/empty frontmatter.
+    """
+    text = skill_md_text.replace("\r\n", "\n")
+    if not text.startswith("---\n"):
+        return {}
+    m = re.match(r"^---\n(.*?)\n---(?:\n|$)", text, re.S)
+    if not m:
+        return {}
+    fm = yaml.safe_load(m.group(1))
+    return fm if fm is not None else {}
+
+
+def enumerate_skills(root):
+    """Return {skill_name: skill_dir} for every dir containing SKILL.md."""
+    out = {}
+    for r, _dirs, files in os.walk(root):
+        if SKILL_MD in files:
+            name = os.path.basename(r)
+            if name != "skills":  # skip a SKILL.md directly under the root
+                out[name] = r
+    return out
+
+
+def make_install_cmd(name):
+    return {
+        "cmd": "npx",
+        "args": ["-y", "skills", "add", REMOTE_URL, "--skill", name, "-g", "-y"],
+    }
+
+
+def make_remove_cmd(name):
+    return {"cmd": "npx", "args": ["-y", "skills", "remove", name, "-g", "-y"]}
+
+
+def build_entry(name, skill_dir):
+    """Build a full catalog entry for one remote skill directory."""
+    raw = open(os.path.join(skill_dir, SKILL_MD), encoding="utf-8").read().replace(
+        "\r\n", "\n"
+    )
+    return {
+        "name": name,
+        "frontmatter": parse_frontmatter(raw),
+        "skill_md": raw,
+        "install_cmd": make_install_cmd(name),
+        "remove_cmd": make_remove_cmd(name),
+        "skill_folder_md5": folder_md5(skill_dir, name),
+    }
+
+
+def acquire_clone(clone_dir):
+    """Return (skills_root, tmp_dir_to_clean). Reuses clone_dir if it has skills/."""
+    if clone_dir and os.path.isdir(os.path.join(clone_dir, "skills")):
+        return os.path.join(clone_dir, "skills"), None
+    tmp = clone_dir or tempfile.mkdtemp(prefix="gencatalog-")
+    subprocess.run(
+        ["git", "clone", "--depth", "1", REMOTE_URL, tmp],
+        check=True,
+        stdout=sys.stderr,
+        stderr=sys.stderr,
+    )
+    return os.path.join(tmp, "skills"), tmp if not clone_dir else None
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Refresh INSTALLABLE_SKILLS.json")
+    ap.add_argument("--out", default="skills/INSTALLABLE_SKILLS.json",
+                    help="catalog JSON path (default: skills/INSTALLABLE_SKILLS.json)")
+    ap.add_argument("--clone-dir", default=None,
+                    help="reuse this clone dir instead of a temp dir")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print the plan, write nothing")
+    ap.add_argument("--add", default=None,
+                    help="comma-separated remote skill names to ADD to the catalog")
+    args = ap.parse_args()
+
+    skills_root, tmp_dir = acquire_clone(args.clone_dir)
+    try:
+        run(skills_root, args)
+    finally:
+        if tmp_dir:
+            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def run(skills_root, args):
+    remote = enumerate_skills(skills_root)
+    print("remote skills: {}".format(len(remote)), file=sys.stderr)
+
+    catalog = json.loads(open(args.out, encoding="utf-8").read())
+    existing = {s["name"]: s for s in catalog["skills"]}
+    print("catalog skills: {}".format(len(existing)), file=sys.stderr)
+
+    updated = []
+    unchanged = 0
+    new_cands = []
+    gone_cands = []
+
+    for name in sorted(remote):
+        skill_dir = remote[name]
+        md5 = folder_md5(skill_dir, name)
+        old = existing.get(name)
+        if old is None:
+            new_cands.append(name)
+            continue
+        if old["skill_folder_md5"] == md5:
+            unchanged += 1
+            continue
+        # MD5 changed: refresh the entry in place with full skill_md.
+        raw = open(os.path.join(skill_dir, SKILL_MD), encoding="utf-8").read().replace(
+            "\r\n", "\n"
+        )
+        old["frontmatter"] = parse_frontmatter(raw)
+        old["skill_md"] = raw
+        old["install_cmd"] = make_install_cmd(name)
+        old["remove_cmd"] = make_remove_cmd(name)
+        old["skill_folder_md5"] = md5
+        updated.append(name)
+
+    for s in catalog["skills"]:
+        if s["name"] not in remote:
+            gone_cands.append(s["name"])
+
+    # Materialize explicitly-requested new skills (--add).
+    added = []
+    if args.add:
+        for name in (n.strip() for n in args.add.split(",")):
+            if not name:
+                continue
+            if name not in remote:
+                print("WARN: --add {}: not found in remote".format(name), file=sys.stderr)
+                continue
+            if name in existing:
+                print("WARN: --add {}: already in catalog".format(name), file=sys.stderr)
+                continue
+            catalog["skills"].append(build_entry(name, remote[name]))
+            added.append(name)
+
+    catalog["skills"].sort(key=lambda s: s["name"])
+
+    print("\n--- summary ---", file=sys.stderr)
+    print("unchanged: {}".format(unchanged), file=sys.stderr)
+    print("updated:   {}".format(len(updated)), file=sys.stderr)
+    for n in updated:
+        print("  ~ {}".format(n), file=sys.stderr)
+    if new_cands:
+        print("new candidates (remote only, NOT written): {}".format(len(new_cands)),
+              file=sys.stderr)
+        for n in new_cands:
+            print("  + {}".format(n), file=sys.stderr)
+        print("  to add them: re-run with --add={}".format(",".join(new_cands)),
+              file=sys.stderr)
+    if gone_cands:
+        print("REMOVED candidates (catalog only, NOT deleted): {}".format(len(gone_cands)),
+              file=sys.stderr)
+        for n in gone_cands:
+            print("  - {}".format(n), file=sys.stderr)
+    if added:
+        print("added (--add): {}".format(len(added)), file=sys.stderr)
+        for n in added:
+            print("  + {}".format(n), file=sys.stderr)
+
+    if args.dry_run:
+        print("\n(dry-run: no file written)", file=sys.stderr)
+        return
+    if not updated and not added:
+        print("\nno changes to write", file=sys.stderr)
+        return
+
+    # json.dumps(ensure_ascii=False, indent=2) reproduces the original
+    # catalog's byte form exactly: no HTML escaping, key order preserved,
+    # no trailing newline.
+    out = json.dumps(catalog, ensure_ascii=False, indent=2)
+    tmp_path = args.out + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(out)
+    os.replace(tmp_path, args.out)
+    print("\nwrote {} ({} skills)".format(args.out, len(catalog["skills"])),
+          file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
