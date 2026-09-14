@@ -22,6 +22,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -57,12 +58,12 @@ type catalog struct {
 // existing file (name, frontmatter, skill_md, install_cmd, remove_cmd,
 // skill_folder_md5) — json.Marshal preserves struct field order.
 type entry struct {
-	Name           string         `json:"name"`
-	Frontmatter    map[string]any `json:"frontmatter"`
-	SkillMD        string         `json:"skill_md"`
-	InstallCmd     cmdSpec        `json:"install_cmd"`
-	RemoveCmd      cmdSpec        `json:"remove_cmd"`
-	SkillFolderMD5 string         `json:"skill_folder_md5"`
+	Name           string     `json:"name"`
+	Frontmatter    orderedMap `json:"frontmatter"`
+	SkillMD        string     `json:"skill_md"`
+	InstallCmd     cmdSpec    `json:"install_cmd"`
+	RemoveCmd      cmdSpec    `json:"remove_cmd"`
+	SkillFolderMD5 string     `json:"skill_folder_md5"`
 }
 
 // cmdSpec is the {cmd, args} shape used by install_cmd / remove_cmd.
@@ -70,6 +71,118 @@ type entry struct {
 type cmdSpec struct {
 	Cmd  string   `json:"cmd"`
 	Args []string `json:"args"`
+}
+
+// orderedMap is a JSON object that preserves key insertion order on both
+// unmarshal and marshal. It is used for frontmatter so that re-serializing
+// an unchanged entry produces byte-identical output: the existing catalog
+// preserves the YAML source's key order (name, description, tags, ... in
+// whatever order each SKILL.md author wrote them), which is neither
+// alphabetical nor a single fixed order. A plain map[string]any would
+// re-sort keys alphabetically and churn every entry in the diff.
+//
+// Values are stored as their natural JSON types (string, []any, etc.) just
+// like map[string]any would hold, so the only behavioral difference from
+// map[string]any is key ordering.
+type orderedMap struct {
+	keys []string
+	vals map[string]any
+}
+
+func newOrderedMap() orderedMap {
+	return orderedMap{vals: map[string]any{}}
+}
+
+// Set inserts or overwrites a key, appending to the key order on first
+// insertion.
+func (m *orderedMap) Set(k string, v any) {
+	if m.vals == nil {
+		m.vals = map[string]any{}
+	}
+	if _, ok := m.vals[k]; !ok {
+		m.keys = append(m.keys, k)
+	}
+	m.vals[k] = v
+}
+
+// MarshalJSON renders the object with keys in insertion order. It uses a
+// json.Encoder with SetEscapeHTML(false) for the values so that literal
+// '<', '>', '&' in frontmatter strings (e.g. "Python3 >= 3.8") are NOT
+// emitted as </>/& — matching the top-level writeCatalog
+// encoder and the existing catalog's literal form. A plain json.Marshal
+// here would re-escape and churn the diff even with writeCatalog's encoder
+// configured, because the value bytes are already escaped before they
+// reach the top-level encoder.
+func (m orderedMap) MarshalJSON() ([]byte, error) {
+	var b bytes.Buffer
+	b.WriteByte('{')
+	for i, k := range m.keys {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		kb, err := marshalNoEscape(k)
+		if err != nil {
+			return nil, err
+		}
+		b.Write(kb)
+		b.WriteByte(':')
+		vb, err := marshalNoEscape(m.vals[k])
+		if err != nil {
+			return nil, err
+		}
+		b.Write(vb)
+	}
+	b.WriteByte('}')
+	return b.Bytes(), nil
+}
+
+// marshalNoEscape serializes v with HTML escaping disabled, so '<', '>',
+// '&' survive as literal bytes. Used for frontmatter keys/values where the
+// existing catalog stores them literally.
+func marshalNoEscape(v any) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	// Encode appends a trailing newline; trim it so the bytes compose
+	// cleanly into the surrounding object.
+	return bytes.TrimRight(b.Bytes(), "\n"), nil
+}
+
+// UnmarshalJSON reads an object preserving key order. Non-object JSON
+// yields an empty map rather than an error, matching the leniency of
+// map[string]any for a missing/null frontmatter.
+func (m *orderedMap) UnmarshalJSON(data []byte) error {
+	*m = newOrderedMap()
+	dec := json.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != json.Delim('{') {
+		// null or non-object: leave empty.
+		return nil
+	}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := t.(string)
+		if !ok {
+			return fmt.Errorf("expected string key, got %T", t)
+		}
+		var val any
+		if err := dec.Decode(&val); err != nil {
+			return err
+		}
+		m.Set(key, val)
+	}
+	_, err = dec.Token() // consume closing '}'
+	return err
 }
 
 func main() {
@@ -303,34 +416,38 @@ func enumerateSkills(root string) (map[string]string, error) {
 }
 
 // computeSkill returns the aggregate MD5, the full SKILL.md text (CRLF
-// normalized), and the parsed frontmatter map for one skill directory.
-func computeSkill(dir, name string) (md5Val, skillMD string, fm map[string]any, err error) {
+// normalized), and the parsed frontmatter (key order preserved) for one
+// skill directory.
+func computeSkill(dir, name string) (md5Val, skillMD string, fm orderedMap, err error) {
 	md5Val, err = skillfs.FolderMD5(dir, name)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("md5 %s: %w", name, err)
+		return "", "", newOrderedMap(), fmt.Errorf("md5 %s: %w", name, err)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, skillMDName))
 	if err != nil {
-		return "", "", nil, fmt.Errorf("read SKILL.md %s: %w", name, err)
+		return "", "", newOrderedMap(), fmt.Errorf("read SKILL.md %s: %w", name, err)
 	}
 	// Normalize CRLF -> LF so the stored skill_md matches what the
 	// skill/fs loader does (skill/fs/loader.go splitFrontmatter).
 	skillMD = strings.ReplaceAll(string(raw), "\r\n", "\n")
 	fm, err = parseFrontmatter([]byte(skillMD))
 	if err != nil {
-		return "", "", nil, fmt.Errorf("frontmatter %s: %w", name, err)
+		return "", "", newOrderedMap(), fmt.Errorf("frontmatter %s: %w", name, err)
 	}
 	return md5Val, skillMD, fm, nil
 }
 
-// parseFrontmatter splits a SKILL.md into its YAML frontmatter map. The
-// body is not returned (the caller keeps the full skill_md). The boundary
-// logic mirrors skill/fs/loader.go splitFrontmatter so the two agree on
-// what counts as frontmatter.
-func parseFrontmatter(data []byte) (map[string]any, error) {
+// parseFrontmatter splits a SKILL.md into its YAML frontmatter as an
+// orderedMap (key order preserved from the source). The body is not
+// returned (the caller keeps the full skill_md). The boundary logic
+// mirrors skill/fs/loader.go splitFrontmatter so the two agree on what
+// counts as frontmatter; the YAML decode uses yaml.Node so that key
+// insertion order — which the existing catalog preserves per-skill —
+// survives the round trip instead of being alphabetized.
+func parseFrontmatter(data []byte) (orderedMap, error) {
 	text := strings.ReplaceAll(string(data), "\r\n", "\n")
 	if !strings.HasPrefix(text, "---\n") {
-		return nil, fmt.Errorf("no frontmatter")
+		return newOrderedMap(), fmt.Errorf("no frontmatter")
 	}
 	// Find the closing "---" on its own line. It is either "\n---\n"
 	// (body follows) or "\n---" at EOF (no body). In both cases the YAML
@@ -340,18 +457,46 @@ func parseFrontmatter(data []byte) (map[string]any, error) {
 		if strings.HasSuffix(text[4:], "\n---") {
 			idx = len(text[4:]) - 4
 		} else {
-			return nil, fmt.Errorf("unclosed frontmatter")
+			return newOrderedMap(), fmt.Errorf("unclosed frontmatter")
 		}
 	}
 	yamlBlock := text[4 : 4+idx]
-	var fm map[string]any
-	if err := yaml.Unmarshal([]byte(yamlBlock), &fm); err != nil {
-		return nil, fmt.Errorf("invalid YAML: %w", err)
+	var node yaml.Node
+	if err := yaml.Unmarshal([]byte(yamlBlock), &node); err != nil {
+		return newOrderedMap(), fmt.Errorf("invalid YAML: %w", err)
 	}
-	if fm == nil {
-		fm = make(map[string]any)
+	return nodeToOrderedMap(&node)
+}
+
+// nodeToOrderedMap converts a yaml.Node (expected to be a mapping) into an
+// orderedMap, preserving key order. A top-level DocumentNode (the wrapper
+// yaml.Unmarshal produces for a full YAML document) is unwrapped to its
+// single Content[0] child first. Non-mapping nodes yield an empty map.
+func nodeToOrderedMap(node *yaml.Node) (orderedMap, error) {
+	m := newOrderedMap()
+	if node == nil {
+		return m, nil
 	}
-	return fm, nil
+	// Unmarshaling a full document yields a DocumentNode whose Content[0]
+	// is the actual mapping; unwrap it so the Kind check below sees the
+	// real node. Without this, frontmatter would silently come back empty
+	// (DocumentNode.Kind != MappingNode).
+	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
+		node = node.Content[0]
+	}
+	if node.Kind != yaml.MappingNode {
+		return m, nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		keyNode := node.Content[i]
+		valNode := node.Content[i+1]
+		var val any
+		if err := valNode.Decode(&val); err != nil {
+			return m, fmt.Errorf("decode %q: %w", keyNode.Value, err)
+		}
+		m.Set(keyNode.Value, val)
+	}
+	return m, nil
 }
 
 // makeInstallCmd builds the install command for a skill. Matches the
@@ -390,12 +535,22 @@ func loadCatalog(path string) (*catalog, error) {
 // writeCatalog serializes the catalog with 2-space indentation, preserving
 // the schema -> skills field order, and writes it atomically over the
 // existing file.
+//
+// A json.Encoder is used with SetEscapeHTML(false) so that literal '<',
+// '>', '&' in skill_md text (common in markdown like "<user input>") are
+// NOT emitted as </>/&. The existing catalog mixes escaped
+// and literal forms across entries (it was generated at different times);
+// disabling HTML escaping yields readable literal output and keeps diffs
+// quiet for unchanged entries once they settle.
 func writeCatalog(path string, c *catalog) error {
-	data, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(c); err != nil {
 		return fmt.Errorf("marshal catalog: %w", err)
 	}
-	data = append(data, '\n')
+	data := buf.Bytes()
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", tmp, err)
