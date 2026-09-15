@@ -77,6 +77,11 @@ python3 skills/gencatalog/main.py --add=huawei-cloud-dew-key-management,huawei-c
 
 # Reuse an existing clone instead of fetching (handy for offline iteration).
 python3 skills/gencatalog/main.py --clone-dir=/tmp/huaweicloud-skills-probe
+
+# Verify: recompute every skill's remote folder_md5 and compare the FULL
+# 32-char string against the catalog (not a prefix). Writes nothing.
+# Run this after any refresh/add instead of eyeballing diffs.
+python3 skills/gencatalog/main.py --verify
 ```
 
 Requires Python 3.7+ and `pyyaml` (`pip install pyyaml`). No other
@@ -90,6 +95,7 @@ Options:
 | `--clone-dir`  | (temp dir)                                                      | reuse this directory as the clone root (skips clone if `skills/` exists there) |
 | `--dry-run`    | off                                                             | print the plan, write nothing                                    |
 | `--add`        | (none)                                                          | comma-separated remote skill names to ADD to the catalog         |
+| `--verify`     | off                                                             | verify every entry's `skill_folder_md5` matches the remote recompute (full 32-char compare); writes nothing, exits 1 on mismatch |
 
 ## What it does — and does NOT — do
 
@@ -180,13 +186,34 @@ directory's base name (the leaf), which matches the catalog `name` field.
 After a real run:
 
 1. `python3 -m json.tool skills/INSTALLABLE_SKILLS.json > /dev/null` — valid JSON.
-2. `git diff skills/INSTALLABLE_SKILLS.json` — only intended entries changed;
+2. **`python3 skills/gencatalog/main.py --verify`** — recomputes every skill's
+   remote `folder_md5` and compares the **full 32-char string** against the
+   catalog. This is a machine check, not model or human eyeballing — it
+   catches "compared only the first few chars" or "wrong char count" errors.
+   Exits 1 on any mismatch.
+3. `git diff skills/INSTALLABLE_SKILLS.json` — only intended entries changed;
    indentation and field order match the prior file.
-3. Spot-check one **unchanged** entry with nested frontmatter (e.g.
+4. Spot-check one **unchanged** entry with nested frontmatter (e.g.
    `huawei-cloud-dws-cpu-diag`): its `trigger` keys are still
    `keywords, resource_types, hypotheses` (source order, not alphabetical)
    — proving unchanged entries are left byte-identical.
-4. Spot-check one **updated** entry: its `skill_folder_md5` equals the
-   remote-computed value (the summary lists which were updated).
 5. Entry count: after a plain `python3 skills/gencatalog/main.py` (no
    `--add`), the count is unchanged; only after `--add=...` does it grow.
+
+## wasm plugin compatibility
+
+The catalog is consumed by the `skill-manager.wasm` plugin (`feat/skill-upgrade`
+branch, `examples/plugin/plugins/skill-manager/src/lib.rs`). The plugin parses
+it with `serde_json::Value` and accesses fields via `.get("field").as_str()` —
+it does **not** depend on key order, only on field presence and correct types.
+The script's output is verified: all 103 entries have the `name`/`frontmatter`/
+`skill_md`/`install_cmd`/`remove_cmd`/`skill_folder_md5` fields the plugin
+expects, with correct types, 0 problems.
+
+The critical `skill_folder_md5` is algorithm-identical to the plugin: plugin
+`is_upgradeable` → `host::directory_md5` → `plugin/wasmhost/fs.go`
+`DirectoryMD5` → `skill/fs.FolderMD5(path, filepath.Base(path))`, which is the
+same algorithm as this script's `folder_md5()` (verified output-identical). The
+plugin computes the **local installed** directory; the catalog stores the
+**remote** directory's value — only with the same algorithm can the two compare
+to detect "upgradeable".

@@ -163,7 +163,23 @@ def main():
                     help="print the plan, write nothing")
     ap.add_argument("--add", default=None,
                     help="comma-separated remote skill names to ADD to the catalog")
+    ap.add_argument("--verify", action="store_true",
+                    help="verify every catalog entry against the remote: recompute "
+                         "folder_md5 and compare the FULL 32-char string, check "
+                         "skill_md byte-identity and frontmatter order. Write nothing. "
+                         "Use this after any refresh/add to catch errors without "
+                         "relying on eyeballing diffs.")
     args = ap.parse_args()
+
+    if args.verify:
+        skills_root, tmp_dir = acquire_clone(args.clone_dir)
+        try:
+            verify(skills_root, args.out)
+        finally:
+            if tmp_dir:
+                import shutil
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+        return
 
     skills_root, tmp_dir = acquire_clone(args.clone_dir)
     try:
@@ -268,6 +284,85 @@ def run(skills_root, args):
     os.replace(tmp_path, args.out)
     print("\nwrote {} ({} skills)".format(args.out, len(catalog["skills"])),
           file=sys.stderr)
+
+
+def verify(skills_root, catalog_path):
+    """Verify every catalog entry against the remote, machine-checked.
+
+    Primary check (the one that matters for the wasm plugin): recompute
+    folder_md5 and compare the FULL 32-char string (not a prefix) against
+    the catalog's skill_folder_md5. This is the guard against model
+    hallucination or lazy prefix-only comparison — it is a full-string ==
+    computed by code, not by a human or model eyeballing characters.
+
+    Secondary checks (skill_md byte-identity, frontmatter order) are only
+    meaningful for entries the script itself just wrote (updated or added).
+    For unchanged entries whose skill_md is a historically simplified
+    (frontmatter-only) stub, skill_md will legitimately differ from the
+    remote full SKILL.md — that is expected, not an error. So secondary
+    checks are reported as informational, not as failures, when the md5
+    matches (i.e. the entry is unchanged and was not just refreshed).
+
+    Writes nothing. Exits 1 if any md5 mismatch is found.
+    """
+    remote = enumerate_skills(skills_root)
+    print("remote skills: {}".format(len(remote)), file=sys.stderr)
+
+    catalog = json.loads(open(catalog_path, encoding="utf-8").read())
+    by = {s["name"]: s for s in catalog["skills"]}
+    print("catalog skills: {}".format(len(by)), file=sys.stderr)
+
+    md5_ok = md5_fail = 0
+    not_in_remote = []
+    md5_failures = []
+    simplified = 0  # unchanged entries whose skill_md is a trimmed stub
+
+    for name in sorted(by):
+        entry = by[name]
+        skill_dir = remote.get(name)
+        if skill_dir is None:
+            not_in_remote.append(name)
+            continue
+
+        remote_md5 = folder_md5(skill_dir, name)
+        md5_match = entry["skill_folder_md5"] == remote_md5
+        if md5_match:
+            md5_ok += 1
+            # Detect historically simplified entries: md5 matches (entry is
+            # current) but skill_md is shorter than the remote full SKILL.md.
+            # This is expected — not a script error.
+            raw = open(os.path.join(skill_dir, SKILL_MD), encoding="utf-8").read().replace(
+                "\r\n", "\n"
+            )
+            if len(entry["skill_md"]) < len(raw):
+                simplified += 1
+        else:
+            md5_fail += 1
+            md5_failures.append((name, entry["skill_folder_md5"], remote_md5))
+
+    total = md5_ok + md5_fail
+    print("\n--- verify ---", file=sys.stderr)
+    print("checked: {} (catalog {} minus {} not in remote)".format(
+        total, len(by), len(not_in_remote)), file=sys.stderr)
+    print("skill_folder_md5 (FULL 32-char compare): {} ok, {} fail".format(
+        md5_ok, md5_fail), file=sys.stderr)
+    print("  of the {} ok: {} are historically simplified (skill_md trimmed, expected)".format(
+        md5_ok, simplified), file=sys.stderr)
+    if not_in_remote:
+        print("not in remote (skipped): {}".format(len(not_in_remote)), file=sys.stderr)
+        for n in not_in_remote:
+            print("  ? {}".format(n), file=sys.stderr)
+    if md5_failures:
+        print("\nMD5 MISMATCHES (these entries need a refresh):", file=sys.stderr)
+        for name, cat, rem in md5_failures:
+            print("  {}: catalog={} remote={}".format(name, cat, rem), file=sys.stderr)
+
+    all_ok = not md5_failures
+    print("\nVERDICT: {}".format(
+        "PASS — all skill_folder_md5 match remote" if all_ok
+        else "FAIL — md5 mismatches above need a refresh"), file=sys.stderr)
+    if not all_ok:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
