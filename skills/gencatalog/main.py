@@ -140,16 +140,42 @@ def build_entry(name, skill_dir):
 
 
 def acquire_clone(clone_dir):
-    """Return (skills_root, tmp_dir_to_clean). Reuses clone_dir if it has skills/."""
+    """Return (skills_root, tmp_dir_to_clean). Reuses clone_dir if it has skills/.
+
+    gitcode.com is a domestic host that does not need a proxy. Clone directly
+    first (proxy env cleared). Only if that fails, retry once WITH the
+    ambient proxy — some locked-down networks block direct gitcode access
+    and require the proxy. This order matches the common case (direct works)
+    and reserves the proxy for environments that actually need it.
+    """
     if clone_dir and os.path.isdir(os.path.join(clone_dir, "skills")):
         return os.path.join(clone_dir, "skills"), None
     tmp = clone_dir or tempfile.mkdtemp(prefix="gencatalog-")
-    subprocess.run(
-        ["git", "clone", "--depth", "1", REMOTE_URL, tmp],
-        check=True,
-        stdout=sys.stderr,
-        stderr=sys.stderr,
-    )
+
+    def try_clone(env):
+        subprocess.run(
+            ["git", "clone", "--depth", "1", REMOTE_URL, tmp],
+            check=True,
+            stdout=sys.stderr,
+            stderr=sys.stderr,
+            env=env,
+        )
+
+    # Build a clean env with proxy vars removed for the first (direct) attempt.
+    direct = {}
+    for k, v in os.environ.items():
+        if k.lower() not in ("http_proxy", "https_proxy", "all_proxy"):
+            direct[k] = v
+
+    try:
+        try_clone(direct)
+    except subprocess.CalledProcessError:
+        # Retry with the ambient env (may include a proxy) for networks
+        # that block direct gitcode access. Clear the partial dir first.
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+        try_clone(None)
+    return os.path.join(tmp, "skills"), tmp if not clone_dir else None
     return os.path.join(tmp, "skills"), tmp if not clone_dir else None
 
 
