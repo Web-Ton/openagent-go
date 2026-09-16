@@ -82,6 +82,11 @@ python3 skills/gencatalog/main.py --clone-dir=/tmp/huaweicloud-skills-probe
 # 32-char string against the catalog (not a prefix). Writes nothing.
 # Run this after any refresh/add instead of eyeballing diffs.
 python3 skills/gencatalog/main.py --verify
+
+# Complete: sync skill_md to the remote SKILL.md for entries that differ
+# (historically simplified frontmatter-only stubs, stale content, or
+# typos). Leaves skill_folder_md5 untouched (remote dir unchanged).
+python3 skills/gencatalog/main.py --complete
 ```
 
 Requires Python 3.7+ and `pyyaml` (`pip install pyyaml`). No other
@@ -96,6 +101,7 @@ Options:
 | `--dry-run`    | off                                                             | print the plan, write nothing                                    |
 | `--add`        | (none)                                                          | comma-separated remote skill names to ADD to the catalog         |
 | `--verify`     | off                                                             | verify every entry's `skill_folder_md5` matches the remote recompute (full 32-char compare); writes nothing, exits 1 on mismatch |
+| `--complete`   | off                                                             | sync `skill_md` to remote for entries that differ; leaves `skill_folder_md5` untouched |
 
 ## What it does — and does NOT — do
 

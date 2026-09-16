@@ -72,6 +72,10 @@ python3 skills/gencatalog/main.py --clone-dir=/tmp/huaweicloud-skills-probe
 # skill_folder_md5 做完整 32 字符比对（不是只比前几位）。
 # 不写文件。任何刷新/新增后都应跑一次，替代人工肉眼比对。
 python3 skills/gencatalog/main.py --verify
+
+# 补全：把 skill_md 与远端 SKILL.md 不一致的条目（历史简化版、内容过时
+# 或有笔误的）刷新为远端完整原文。不动 skill_folder_md5（远端目录没变）。
+python3 skills/gencatalog/main.py --complete
 ```
 
 需要 Python 3.7+ 和 `pyyaml`（`pip install pyyaml`），无其它依赖。
@@ -85,6 +89,7 @@ python3 skills/gencatalog/main.py --verify
 | `--dry-run`   | 关                                                              | 打印计划，不写文件                                               |
 | `--add`       | （无）                                                          | 逗号分隔的远端 skill 名，指定要新增到 catalog 的 skill           |
 | `--verify`    | 关                                                              | 校验每个条目的 `skill_folder_md5` 与远端重算值完整一致；不写文件，不一致时退出码 1 |
+| `--complete`  | 关                                                              | 把 `skill_md` 与远端不一致的条目刷新为远端完整原文；不动 `skill_folder_md5` |
 
 ## 做什么 —— 以及不做什么
 

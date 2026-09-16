@@ -176,7 +176,6 @@ def acquire_clone(clone_dir):
         shutil.rmtree(tmp, ignore_errors=True)
         try_clone(None)
     return os.path.join(tmp, "skills"), tmp if not clone_dir else None
-    return os.path.join(tmp, "skills"), tmp if not clone_dir else None
 
 
 def main():
@@ -189,6 +188,12 @@ def main():
                     help="print the plan, write nothing")
     ap.add_argument("--add", default=None,
                     help="comma-separated remote skill names to ADD to the catalog")
+    ap.add_argument("--complete", action="store_true",
+                    help="restore full skill_md for historically simplified "
+                         "(frontmatter-only) entries from the remote SKILL.md. "
+                         "Does not change skill_folder_md5 (the remote dir is "
+                         "unchanged). Use this to undo the one-off size-reduction "
+                         "trim that left ~20 entries with an empty body.")
     ap.add_argument("--verify", action="store_true",
                     help="verify every catalog entry against the remote: recompute "
                          "folder_md5 and compare the FULL 32-char string, check "
@@ -201,6 +206,16 @@ def main():
         skills_root, tmp_dir = acquire_clone(args.clone_dir)
         try:
             verify(skills_root, args.out)
+        finally:
+            if tmp_dir:
+                import shutil
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+        return
+
+    if args.complete:
+        skills_root, tmp_dir = acquire_clone(args.clone_dir)
+        try:
+            complete(skills_root, args)
         finally:
             if tmp_dir:
                 import shutil
@@ -303,6 +318,82 @@ def run(skills_root, args):
     # json.dumps(ensure_ascii=False, indent=2) reproduces the original
     # catalog's byte form exactly: no HTML escaping, key order preserved,
     # no trailing newline.
+    out = json.dumps(catalog, ensure_ascii=False, indent=2)
+    tmp_path = args.out + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(out)
+    os.replace(tmp_path, args.out)
+    print("\nwrote {} ({} skills)".format(args.out, len(catalog["skills"])),
+          file=sys.stderr)
+
+
+def complete(skills_root, args):
+    """Restore full skill_md for entries that don't match the remote.
+
+    Two kinds of mismatch are fixed:
+      - Historically simplified: skill_md body was trimmed to frontmatter-only
+        in a one-off size-reduction pass.
+      - Stale/incorrect: skill_md was generated from an older or mis-copied
+        SKILL.md (e.g. a name typo like "dws-mem-diag" vs "dws-dymem-diag").
+
+    Both are fixed the same way: overwrite skill_md + frontmatter with the
+    current remote SKILL.md. skill_folder_md5 is left untouched — it hashes
+    the whole remote directory, and the directory's md5 is still correct
+    (verified by --verify), even when an individual file inside it was
+    edited in the catalog copy.
+
+    Supports --dry-run to preview which entries would be completed.
+    """
+    remote = enumerate_skills(skills_root)
+    print("remote skills: {}".format(len(remote)), file=sys.stderr)
+
+    catalog = json.loads(open(args.out, encoding="utf-8").read())
+    by = {s["name"]: s for s in catalog["skills"]}
+    print("catalog skills: {}".format(len(by)), file=sys.stderr)
+
+    completed = []
+    skipped_match = 0
+    skipped_not_in_remote = 0
+
+    for name in sorted(by):
+        entry = by[name]
+        skill_dir = remote.get(name)
+        if skill_dir is None:
+            print("WARN: {} not in remote, cannot complete".format(name),
+                  file=sys.stderr)
+            skipped_not_in_remote += 1
+            continue
+
+        raw = open(os.path.join(skill_dir, SKILL_MD), encoding="utf-8").read().replace(
+            "\r\n", "\n"
+        )
+        if entry.get("skill_md") == raw:
+            skipped_match += 1
+            continue
+
+        # skill_md differs from remote (simplified, stale, or typo). Overwrite
+        # with the remote content. Do NOT touch skill_folder_md5 — the remote
+        # directory's md5 is unchanged (verified by --verify).
+        entry["skill_md"] = raw
+        entry["frontmatter"] = parse_frontmatter(raw)
+        completed.append(name)
+
+    print("\n--- complete ---", file=sys.stderr)
+    print("completed (skill_md synced to remote): {}".format(len(completed)),
+          file=sys.stderr)
+    for n in completed:
+        print("  + {}".format(n), file=sys.stderr)
+    print("skipped (already match remote): {}".format(skipped_match), file=sys.stderr)
+    print("skipped (not in remote): {}".format(skipped_not_in_remote), file=sys.stderr)
+
+    if args.dry_run:
+        print("\n(dry-run: no file written)", file=sys.stderr)
+        return
+    if not completed:
+        print("\nno changes to write", file=sys.stderr)
+        return
+
+    catalog["skills"].sort(key=lambda s: s["name"])
     out = json.dumps(catalog, ensure_ascii=False, indent=2)
     tmp_path = args.out + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
