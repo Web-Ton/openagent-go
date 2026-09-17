@@ -518,7 +518,7 @@ func TestWebSearchTavilyNetworkErrorHint(t *testing.T) {
 	if !strings.Contains(err.Error(), "Hint:") {
 		t.Errorf("tavily network error should carry bocha hint: %v", err)
 	}
-	if !strings.Contains(err.Error(), "OPENAGENT_WEB_SEARCH_ENGINE=bocha") {
+	if !strings.Contains(err.Error(), searchEngineEnv+"=bocha") {
 		t.Errorf("hint should name the env var: %v", err)
 	}
 }
@@ -535,11 +535,15 @@ func TestWebSearchBochaNetworkErrorNoHint(t *testing.T) {
 	}
 }
 
-func TestWebSearchTavilyHTTPErrorNoHint(t *testing.T) {
-	// An HTTP-layer error (4xx) is NOT a reachability problem — the hint
-	// must not appear (switching engines won't fix a 401/429).
+func TestWebSearchTavily429HintKeyless(t *testing.T) {
+	// HTTP 429 from Tavily keyless mode IS a rate-limit the user can fix
+	// (register an API key or switch to Bocha). The error must carry an
+	// actionable hint with the registration URL and env-var instructions.
+	t.Setenv(tavilyKeyEnv, "") // ensure keyless mode
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "rate limited", http.StatusTooManyRequests)
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":{"code":"daily_cap_reached","message":"You reached the daily keyless Tavily limit."}}`))
 	}))
 	defer srv.Close()
 
@@ -547,7 +551,105 @@ func TestWebSearchTavilyHTTPErrorNoHint(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected 429 error")
 	}
+	if !strings.Contains(err.Error(), "429") {
+		t.Errorf("error should mention 429: %v", err)
+	}
+	if !strings.Contains(err.Error(), "To fix this:") {
+		t.Errorf("429 should carry rate-limit hint: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Register a free Tavily API key") {
+		t.Errorf("keyless 429 hint should mention registration: %v", err)
+	}
+	if !strings.Contains(err.Error(), searchEngineEnv+"=bocha") {
+		t.Errorf("429 hint should name the env var: %v", err)
+	}
+	if !strings.Contains(err.Error(), "https://tavily.com") {
+		t.Errorf("429 hint should include Tavily signup URL: %v", err)
+	}
+	if strings.Contains(err.Error(), "quota is exhausted") {
+		t.Errorf("keyless 429 must NOT pick the with-key hint: %v", err)
+	}
+	t.Logf("✅ keyless 429 carries rate-limit hint: %v", err)
+}
+
+func TestWebSearchTavily429HintWithKey(t *testing.T) {
+	// When TAVILY_API_KEY is already set but 429 still occurs (paid quota
+	// exhausted), the hint should mention plan upgrade, not registration.
+	t.Setenv(tavilyKeyEnv, "tvly-test-key")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":{"code":"rate_limit_exceeded","message":"Monthly credits exhausted."}}`))
+	}))
+	defer srv.Close()
+
+	_, err := webSearchAt(context.Background(), srv.URL, newTestClient(), json.RawMessage(`{"query":"x"}`), engineTavily)
+	if err == nil {
+		t.Fatal("expected 429 error")
+	}
+	if !strings.Contains(err.Error(), "429") {
+		t.Errorf("error should mention 429: %v", err)
+	}
+	if !strings.Contains(err.Error(), "To fix this:") {
+		t.Errorf("429 should carry rate-limit hint: %v", err)
+	}
+	if !strings.Contains(err.Error(), "quota is exhausted") {
+		t.Errorf("429 with API key should mention quota exhaustion: %v", err)
+	}
+	if !strings.Contains(err.Error(), "https://tavily.com/pricing") {
+		t.Errorf("429 with API key should mention pricing/upgrade page: %v", err)
+	}
+	if !strings.Contains(err.Error(), searchEngineEnv+"=bocha") {
+		t.Errorf("429 hint should name the env var: %v", err)
+	}
+	if strings.Contains(err.Error(), "Register a free Tavily API key") {
+		t.Errorf("with-key 429 must NOT pick the keyless hint: %v", err)
+	}
+	t.Logf("✅ 429 with API key carries upgrade hint: %v", err)
+}
+
+func TestWebSearchTavily401NoHint(t *testing.T) {
+	// Non-429 HTTP errors (e.g. 401) must NOT carry the rate-limit hint —
+	// the user can't fix an auth error by registering a key.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	_, err := webSearchAt(context.Background(), srv.URL, newTestClient(), json.RawMessage(`{"query":"x"}`), engineTavily)
+	if err == nil {
+		t.Fatal("expected 401 error")
+	}
+	if !strings.Contains(err.Error(), "401") {
+		t.Errorf("error should mention 401: %v", err)
+	}
+	if strings.Contains(err.Error(), "To fix this:") {
+		t.Errorf("401 should NOT carry rate-limit hint: %v", err)
+	}
 	if strings.Contains(err.Error(), "Hint:") {
-		t.Errorf("HTTP 429 should NOT carry bocha hint: %v", err)
+		t.Errorf("401 should NOT carry bocha hint: %v", err)
+	}
+}
+
+func TestWebSearchBocha429NoTavilyHint(t *testing.T) {
+	// Bocha 429 should not carry Tavily-specific hints (no third engine to
+	// suggest; Bocha has no keyless tier).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	_, err := webSearchAt(context.Background(), srv.URL, newTestClient(), json.RawMessage(`{"query":"x"}`), engineBocha)
+	if err == nil {
+		t.Fatal("expected 429 error")
+	}
+	if !strings.Contains(err.Error(), "429") {
+		t.Errorf("error should mention 429: %v", err)
+	}
+	if strings.Contains(err.Error(), "To fix this:") {
+		t.Errorf("Bocha 429 should NOT carry tavily rate-limit hint: %v", err)
+	}
+	if strings.Contains(err.Error(), "tavily.com") {
+		t.Errorf("Bocha 429 should NOT mention tavily.com: %v", err)
 	}
 }

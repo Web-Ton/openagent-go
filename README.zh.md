@@ -54,19 +54,21 @@
 
 #### Web 搜索后端
 
-`websearch` 工具支持两个后端，通过 `OPENAGENT_WEB_SEARCH_ENGINE` 选择：
+`websearch` 工具支持两个后端，通过 `<名称>_WEB_SEARCH_ENGINE` 环境变量选择，其中 `<名称>` 为大写的 agent 名称（默认构建为 `OPENAGENT_WEB_SEARCH_ENGINE`，由构建时的 `version.Name` 决定——改名构建如 `MYAGENT_WEB_SEARCH_ENGINE`）：
 
 | 引擎 | 默认 | 国内可达 | API key | 环境变量 |
 |------|------|---------|---------|---------|
 | `tavily` | 是 | 有时（AWS us-east） | 可选（keyless 可用） | `TAVILY_API_KEY`（提高速率限额） |
 | `bocha` | 否 | 是 | 必需 | `BOCHA_API_KEY` |
 
-默认 `tavily`（keyless，无需账号）。如果 Tavily 在你的网络下不可达，错误信息会附带切换提示。使用博查（推荐国内用户）：
+默认 `tavily`（keyless，无需账号）。如果 Tavily 在你的网络下不可达，错误信息会附带切换提示。Tavily keyless 模式的 429 会附带注册免费 API key 的提示。使用博查（推荐国内用户）：
 
 ```bash
 export OPENAGENT_WEB_SEARCH_ENGINE=bocha
 export BOCHA_API_KEY=<你的-key>   # 在 https://open.bochaai.com 获取
 ```
+
+在重命名的构建中（通过 ldflags 注入 `version.Name`），将 `OPENAGENT` 替换为大写的名称，例如 `MYAGENT_WEB_SEARCH_ENGINE`。
 
 ### 飞书集成
 
